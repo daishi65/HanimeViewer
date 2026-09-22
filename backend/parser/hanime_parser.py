@@ -111,6 +111,43 @@ class HanimeParser:
 
         return result
 
+    def get_home_sections(self):
+
+        print("===== 调试首页结构 =====")
+
+
+        print(
+            self.soup.title
+        )
+
+
+        headings = self.soup.find_all(
+            [
+                "h1",
+                "h2",
+                "h3"
+            ]
+        )
+
+
+        print(
+            "标题数量:",
+            len(headings)
+        )
+
+
+        for h in headings[:20]:
+
+            print(
+                "标题:",
+                h.get_text(strip=True)
+            )
+
+
+        print("=======================")
+
+
+        return []
     def get_playlists(self, limit=None):
         result = []
 

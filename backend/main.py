@@ -48,43 +48,24 @@ def home_videos():
 
         parser = HanimeParser(html)
 
-        cards = parser.get_video_cards()
 
-        # 只保留 Hanime 自己的视频页面，过滤广告
-        real_cards = [
-            card
-            for card in cards
-            if card.url.startswith("https://hanime1.me/watch?")
-        ]
+        sections = parser.get_home_sections()
 
-        print("解析到的视频卡片数量:")
-        print(len(cards))
 
-        print("过滤广告后的视频数量:")
-        print(len(real_cards))
+        print("解析栏目数量:")
+        print(len(sections))
 
-        results = []
-
-        for card in real_cards:
-            results.append({
-                "title": card.title,
-                "url": card.url,
-                "thumbnail": card.thumbnail,
-                "duration": card.duration,
-                "rating": card.rating,
-                "views": card.views
-            })
 
         return {
-            "results": results
+            "sections": sections
         }
+
 
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail=str(exc)
         )
-
 
 @app.get("/api/search")
 def search_videos(query: str):
@@ -99,7 +80,7 @@ def search_videos(query: str):
         chrome.navigate(url)
 
         print("等待页面加载...")
-        time.sleep(5)
+        time.sleep(10)
 
         print("当前页面 URL:")
         print(chrome.get_url())
@@ -114,13 +95,14 @@ def search_videos(query: str):
 
         parser = HanimeParser(html)
 
-        cards = parser.get_video_cards()
+        sections = parser.get_home_sections()
 
         # 只保留 Hanime 自己的视频页面，过滤广告
         real_cards = [
             card
-            for card in cards
-            if card.url.startswith("https://hanime1.me/watch?")
+            for section in sections
+            for card in section["videos"]
+            if card["url"].startswith("https://hanime1.me/watch?")
         ]
 
         print("解析到的视频卡片数量:")
