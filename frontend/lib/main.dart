@@ -1126,9 +1126,10 @@ class _FullscreenPlayerPageState
     return Scaffold(
       backgroundColor: Colors.black,
 
-      body: MouseRegion(
-        onHover: (_) => _show(),
-
+      body: Listener(
+        onPointerHover: (_) => _show(),
+        onPointerMove: (_) => _show(),
+        behavior: HitTestBehavior.opaque,
         child: Stack(
           fit: StackFit.expand,
 
