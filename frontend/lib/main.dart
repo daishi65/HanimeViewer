@@ -1909,42 +1909,178 @@ Future<void> _showFullscreenPlayer() async {
     context,
     MaterialPageRoute(
       builder: (_) {
-        return Scaffold(
-          backgroundColor: Colors.black,
-          body: Stack(
-            fit: StackFit.expand,
-            children: [
+        return StatefulBuilder(
+          builder: (
+            context,
+            setFullState,
+          ) {
+            bool showControls = true;
+            Timer? timer;
 
-              Center(
-                child: AspectRatio(
-                  aspectRatio:
-                      controller.value.aspectRatio,
-                  child:
-                      VideoPlayer(controller),
+            void show() {
+              setFullState(() {
+                showControls = true;
+              });
+
+              timer?.cancel();
+
+              timer = Timer(
+                const Duration(seconds: 3),
+                () {
+                  setFullState(() {
+                    showControls = false;
+                  });
+                },
+              );
+            }
+
+            return Scaffold(
+              backgroundColor:
+                  Colors.black,
+              body: MouseRegion(
+                onHover: (_) {
+                  show();
+                },
+
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+
+                    Center(
+                      child: AspectRatio(
+                        aspectRatio:
+                            controller.value.aspectRatio,
+                        child:
+                            VideoPlayer(
+                          controller,
+                        ),
+                      ),
+                    ),
+
+
+                    // 底部常驻细进度条
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child:
+                          VideoProgressIndicator(
+                        controller,
+                        allowScrubbing:
+                            false,
+                        colors:
+                            const VideoProgressColors(
+                          playedColor:
+                              Colors.red,
+                          bufferedColor:
+                              Colors.white38,
+                          backgroundColor:
+                              Colors.white24,
+                        ),
+                        padding:
+                            EdgeInsets.zero,
+                      ),
+                    ),
+
+
+                    if (showControls)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        child: Container(
+                          color:
+                              Colors.black87,
+                          padding:
+                              const EdgeInsets.all(8),
+                          child: Row(
+                            children: [
+
+                              IconButton(
+                                color:
+                                    Colors.white,
+                                icon: Icon(
+                                  controller
+                                          .value
+                                          .isPlaying
+                                      ? Icons.pause
+                                      : Icons.play_arrow,
+                                ),
+                                onPressed: () {
+                                  setFullState(() {
+                                    if (controller
+                                        .value
+                                        .isPlaying) {
+                                      controller.pause();
+                                    } else {
+                                      controller.play();
+                                    }
+                                  });
+                                },
+                              ),
+
+
+                              Expanded(
+                                child:
+                                    VideoProgressIndicator(
+                                  controller,
+                                  allowScrubbing:
+                                      true,
+                                ),
+                              ),
+
+
+                              IconButton(
+                                color:
+                                    Colors.white,
+                                icon:
+                                    const Icon(
+                                  Icons.fullscreen_exit,
+                                ),
+                                onPressed:
+                                    () async {
+                                  await windowManager
+                                      .setFullScreen(
+                                          false);
+
+                                  Navigator.pop(
+                                      context);
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+
+
+                    Positioned(
+                      top: 20,
+                      left: 20,
+                      child:
+                          IconButton(
+                        color:
+                            Colors.white,
+                        icon:
+                            const Icon(
+                          Icons.arrow_back,
+                          size: 32,
+                        ),
+                        onPressed:
+                            () async {
+                          await windowManager
+                              .setFullScreen(
+                                  false);
+
+                          Navigator.pop(
+                              context);
+                        },
+                      ),
+                    ),
+                  ],
                 ),
               ),
-
-              Positioned(
-                top: 20,
-                left: 20,
-                child: IconButton(
-                  color: Colors.white,
-                  icon: const Icon(
-                    Icons.fullscreen_exit,
-                    size: 32,
-                  ),
-                  onPressed: () async {
-                    await windowManager
-                        .setFullScreen(false);
-
-                    if (mounted) {
-                      Navigator.pop(context);
-                    }
-                  },
-                ),
-              ),
-            ],
-          ),
+            );
+          },
         );
       },
     ),
@@ -1952,7 +2088,6 @@ Future<void> _showFullscreenPlayer() async {
 
   await windowManager.setFullScreen(false);
 }
-
   void _scrollToCurrentVideo() {
     final key =
         _playlistKeys[widget.videoId];
