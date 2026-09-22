@@ -1914,31 +1914,42 @@ Future<void> _showFullscreenPlayer() async {
             context,
             setFullState,
           ) {
-            bool showControls = true;
+            bool showControls = false;
             Timer? timer;
 
+
             void show() {
+
               setFullState(() {
                 showControls = true;
               });
 
+
               timer?.cancel();
+
 
               timer = Timer(
                 const Duration(seconds: 3),
                 () {
+
                   setFullState(() {
                     showControls = false;
                   });
+
                 },
               );
+
             }
 
             return Scaffold(
               backgroundColor:
                   Colors.black,
-              body: MouseRegion(
-                onHover: (_) {
+
+              body: Listener(
+                behavior:
+                    HitTestBehavior.translucent,
+
+                onPointerHover: (_) {
                   show();
                 },
 
@@ -1959,12 +1970,13 @@ Future<void> _showFullscreenPlayer() async {
 
 
                     // 底部常驻细进度条
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child:
-                          VideoProgressIndicator(
+                    if (!showControls)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        child:
+                            VideoProgressIndicator(
                         controller,
                         allowScrubbing:
                             false,
