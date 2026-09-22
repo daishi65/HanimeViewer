@@ -56,7 +56,7 @@ class HanimeParser:
 
         return result
 
-    def get_video_cards(self, limit=10):
+    def get_video_cards(self, limit=144):
         result = []
 
         cards = self.soup.find_all("a", class_="video-link")
