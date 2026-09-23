@@ -14,9 +14,6 @@ void main() async {
 
   await windowManager.ensureInitialized();
 
-  // 防止热重启后卡在系统全屏
-  await windowManager.setFullScreen(false);
-
   runApp(const HanimeViewerApp());
 }
 
@@ -258,9 +255,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _loadHomeVideos() async {
-
-    print("开始加载首页");
-
     setState(() {
       _loading = true;
       _error = null;
@@ -281,15 +275,10 @@ class _HomePageState extends State<HomePage> {
 
       final data = jsonDecode(response.body);
 
-      print("收到首页数据");
-      print(data);
-
       final videos =
           List<Map<String, dynamic>>.from(
         data['results'] ?? [],
       );
-
-      print("Flutter收到视频数量: ${videos.length}");
 
       if (mounted) {
         setState(() => _videos = videos);
@@ -477,15 +466,13 @@ class _HomePageState extends State<HomePage> {
         ) {
           int columns;
 
-          if (constraints.maxWidth >= 1500) {
-            columns = 6;
-          } else if (constraints.maxWidth >= 1200) {
-            columns = 5;
-          } else if (constraints.maxWidth >= 900) {
+          if (constraints.maxWidth >= 1200) {
             columns = 4;
-          } else if (constraints.maxWidth >= 600) {
+          } else if (
+              constraints.maxWidth >= 850) {
             columns = 3;
-          } else if (constraints.maxWidth >= 400) {
+          } else if (
+              constraints.maxWidth >= 550) {
             columns = 2;
           } else {
             columns = 1;
@@ -499,17 +486,13 @@ class _HomePageState extends State<HomePage> {
               crossAxisCount: columns,
               crossAxisSpacing: 16,
               mainAxisSpacing: 16,
-              mainAxisExtent: 330,
+              mainAxisExtent: 310,
             ),
             itemCount: _videos.length,
-            itemBuilder: (_, index) {
-
-              print("正在生成第 $index 个视频");
-
-              return _buildCard(
-                _videos[index],
-              );
-            },
+            itemBuilder: (_, index) =>
+                _buildCard(
+              _videos[index],
+            ),
           );
         },
       ),
@@ -1100,353 +1083,101 @@ class FullscreenPlayerPage extends StatefulWidget {
       _FullscreenPlayerPageState();
 }
 
-
 class _FullscreenPlayerPageState
     extends State<FullscreenPlayerPage> {
 
-  bool _showControls = false;
-
+  bool _showControls = true;
   Timer? _timer;
 
-
   void _show() {
-
     setState(() {
       _showControls = true;
     });
 
-
     _timer?.cancel();
-
 
     _timer = Timer(
       const Duration(seconds: 3),
       () {
-
-        if (mounted) {
-
+        if(mounted){
           setState(() {
-            _showControls = false;
+            _showControls=false;
           });
-
         }
-
       },
     );
-
   }
 
 
-
   @override
-  void dispose() {
-
+  void dispose(){
     _timer?.cancel();
-
     super.dispose();
-
   }
 
 
-
-
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context){
 
     final controller =
         widget.controller;
 
 
     return Scaffold(
+      backgroundColor: Colors.black,
 
-      backgroundColor:
-          Colors.black,
+      body: Listener(
+        onPointerHover: (_) => _show(),
+        onPointerMove: (_) => _show(),
+        behavior: HitTestBehavior.opaque,
+        child: Stack(
+          fit: StackFit.expand,
 
-
-      body:
-
-      Listener(
-
-        behavior:
-            HitTestBehavior.opaque,
-
-
-        onPointerMove: (_) {
-
-          _show();
-
-        },
-
-
-        child:
-
-        MouseRegion(
-
-          onHover: (_) {
-
-            _show();
-
-          },
-
-
-          child:
-
-          Stack(
-
-            fit:
-                StackFit.expand,
-
-
-            children: [
-
-
-              Center(
+          children:[
+            
+            Center(
+              child: AspectRatio(
+                aspectRatio:
+                    controller.value.aspectRatio,
 
                 child:
-
-                AspectRatio(
-
-                  aspectRatio:
-                      controller.value.aspectRatio,
-
-
-                  child:
-
-                  VideoPlayer(controller),
-
-                ),
-
+                    VideoPlayer(controller),
               ),
+            ),
 
 
-
-              // 鼠标静止时显示细进度条
-
-              if (!_showControls)
-
-                Positioned(
-
-                  left: 0,
-
-                  right: 0,
-
-                  bottom: 0,
-
-
-                  child:
-
-                  VideoProgressIndicator(
-
-                    controller,
-
-                    allowScrubbing: false,
-
-
-                    colors:
-
-                    const VideoProgressColors(
-
-                      playedColor:
-                          Colors.red,
-
-                      bufferedColor:
-                          Colors.white38,
-
-                      backgroundColor:
-                          Colors.white24,
-
-                    ),
-
-                  ),
-
-                ),
-
-
-
-
-              // 鼠标移动后显示控制栏
-
-              if (_showControls)
-
-                Positioned(
-
-                  left: 0,
-
-                  right: 0,
-
-                  bottom: 0,
-
-
-                  child:
-
-                  Container(
-
-                    height: 70,
-
-                    color:
-                        Colors.black87,
-
-
-                    child:
-
-                    Row(
-
-                      children: [
-
-
-                        IconButton(
-
-                          color:
-                              Colors.white,
-
-
-                          icon:
-
-                          Icon(
-
-                            controller.value.isPlaying
-
-                                ? Icons.pause
-
-                                : Icons.play_arrow,
-
-                          ),
-
-
-                          onPressed: () {
-
-                            setState(() {
-
-                              if (controller.value.isPlaying) {
-
-                                controller.pause();
-
-                              } else {
-
-                                controller.play();
-
-                              }
-
-                            });
-
-                          },
-
-                        ),
-
-
-
-                        Expanded(
-
-                          child:
-
-                          VideoProgressIndicator(
-
-                            controller,
-
-                            allowScrubbing: true,
-
-                          ),
-
-                        ),
-
-
-
-                        IconButton(
-
-                          color:
-                              Colors.white,
-
-
-                          icon:
-
-                          const Icon(
-                            Icons.fullscreen_exit,
-                          ),
-
-
-                          onPressed: () async {
-
-
-                            await windowManager
-                                .setFullScreen(false);
-
-
-                            Navigator.pop(context);
-
-
-                          },
-
-                        ),
-
-
-                      ],
-
-                    ),
-
-                  ),
-
-                ),
-
-
-
-
-              // 左上角退出按钮
+            if(_showControls)
 
               Positioned(
-
-                top: 20,
-
-                left: 20,
-
+                left:0,
+                right:0,
+                bottom:0,
 
                 child:
+                    Container(
+                      height:60,
+                      color:
+                          Colors.black87,
 
-                IconButton(
-
-                  color:
-                      Colors.white,
-
-
-                  icon:
-
-                  const Icon(
-
-                    Icons.arrow_back,
-
-                    size: 32,
-
-                  ),
-
-
-                  onPressed: () async {
-
-
-                    await windowManager
-                        .setFullScreen(false);
-
-
-                    Navigator.pop(context);
-
-
-                  },
-
-                ),
-
+                      child:
+                          const Center(
+                            child:
+                            Text(
+                              '全屏控制栏',
+                              style:
+                              TextStyle(
+                                color:
+                                Colors.white,
+                              ),
+                            ),
+                          ),
+                    ),
               ),
-
-
-            ],
-
-          ),
-
+          ],
         ),
-
       ),
-
     );
-
   }
-
 }
 
 class VideoDetailPage
@@ -2177,16 +1908,186 @@ Future<void> _showFullscreenPlayer() async {
   await Navigator.push(
     context,
     MaterialPageRoute(
-      builder: (_) =>
-          FullscreenPlayerPage(
-        controller: controller,
-      ),
+      builder: (_) {
+        return StatefulBuilder(
+          builder: (
+            context,
+            setFullState,
+          ) {
+            bool showControls = true;
+            Timer? timer;
+
+            void show() {
+              setFullState(() {
+                showControls = true;
+              });
+
+              timer?.cancel();
+
+              timer = Timer(
+                const Duration(seconds: 3),
+                () {
+                  setFullState(() {
+                    showControls = false;
+                  });
+                },
+              );
+            }
+
+            return Scaffold(
+              backgroundColor:
+                  Colors.black,
+              body: MouseRegion(
+                onHover: (_) {
+                  show();
+                },
+
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+
+                    Center(
+                      child: AspectRatio(
+                        aspectRatio:
+                            controller.value.aspectRatio,
+                        child:
+                            VideoPlayer(
+                          controller,
+                        ),
+                      ),
+                    ),
+
+
+                    // 底部常驻细进度条
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child:
+                          VideoProgressIndicator(
+                        controller,
+                        allowScrubbing:
+                            false,
+                        colors:
+                            const VideoProgressColors(
+                          playedColor:
+                              Colors.red,
+                          bufferedColor:
+                              Colors.white38,
+                          backgroundColor:
+                              Colors.white24,
+                        ),
+                        padding:
+                            EdgeInsets.zero,
+                      ),
+                    ),
+
+
+                    if (showControls)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        child: Container(
+                          color:
+                              Colors.black87,
+                          padding:
+                              const EdgeInsets.all(8),
+                          child: Row(
+                            children: [
+
+                              IconButton(
+                                color:
+                                    Colors.white,
+                                icon: Icon(
+                                  controller
+                                          .value
+                                          .isPlaying
+                                      ? Icons.pause
+                                      : Icons.play_arrow,
+                                ),
+                                onPressed: () {
+                                  setFullState(() {
+                                    if (controller
+                                        .value
+                                        .isPlaying) {
+                                      controller.pause();
+                                    } else {
+                                      controller.play();
+                                    }
+                                  });
+                                },
+                              ),
+
+
+                              Expanded(
+                                child:
+                                    VideoProgressIndicator(
+                                  controller,
+                                  allowScrubbing:
+                                      true,
+                                ),
+                              ),
+
+
+                              IconButton(
+                                color:
+                                    Colors.white,
+                                icon:
+                                    const Icon(
+                                  Icons.fullscreen_exit,
+                                ),
+                                onPressed:
+                                    () async {
+                                  await windowManager
+                                      .setFullScreen(
+                                          false);
+
+                                  Navigator.pop(
+                                      context);
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+
+
+                    Positioned(
+                      top: 20,
+                      left: 20,
+                      child:
+                          IconButton(
+                        color:
+                            Colors.white,
+                        icon:
+                            const Icon(
+                          Icons.arrow_back,
+                          size: 32,
+                        ),
+                        onPressed:
+                            () async {
+                          await windowManager
+                              .setFullScreen(
+                                  false);
+
+                          Navigator.pop(
+                              context);
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
     ),
   );
 
   await windowManager.setFullScreen(false);
 }
-
   void _scrollToCurrentVideo() {
     final key =
         _playlistKeys[widget.videoId];

@@ -56,7 +56,7 @@ class HanimeParser:
 
         return result
 
-    def get_video_cards(self, limit=144):
+    def get_video_cards(self, limit=10):
         result = []
 
         cards = self.soup.find_all("a", class_="video-link")
@@ -111,52 +111,6 @@ class HanimeParser:
 
         return result
 
-    def get_home_sections(self):
-
-        print("===== 调试首页结构 =====")
-
-
-        print(
-            self.soup.title
-        )
-
-
-        headings = self.soup.find_all(
-            [
-                "h1",
-                "h2",
-                "h3"
-            ]
-        )
-
-
-        print(
-            "标题数量:",
-            len(headings)
-        )
-
-
-        for h in headings[:20]:
-
-            print(
-                "标题:",
-                h.get_text(strip=True)
-            )
-
-
-        print("=======================")
-
-
-        print(
-            "前5个div:"
-        )
-
-        for div in self.soup.find_all("div")[:5]:
-            print(div)
-
-
-        return []
-    
     def get_playlists(self, limit=None):
         result = []
 
