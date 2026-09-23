@@ -200,9 +200,10 @@ def get_video(video_id: str):
             "release_date": detail.release_date,
             "file_size": detail.file_size,
             "tags": detail.tags,
-            "playlist": playlist_videos
+            "playlist": playlist_videos,
+            "sources": detail.sources
         }
-
+    
     except Exception as exc:
         raise HTTPException(
             status_code=500,

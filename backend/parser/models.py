@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -21,3 +21,4 @@ class VideoDetail:
     release_date: str
     file_size: str
     tags: list[str]
+    sources: list = field(default_factory=list)

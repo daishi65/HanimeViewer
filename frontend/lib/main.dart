@@ -466,27 +466,37 @@ class _HomePageState extends State<HomePage> {
         ) {
           int columns;
 
-          if (constraints.maxWidth >= 1200) {
+          if (constraints.maxWidth >= 1600) {
+            columns = 6;
+          } else if (constraints.maxWidth >= 1300) {
+            columns = 5;
+          } else if (constraints.maxWidth >= 1000) {
             columns = 4;
-          } else if (
-              constraints.maxWidth >= 850) {
+          } else if (constraints.maxWidth >= 750) {
             columns = 3;
-          } else if (
-              constraints.maxWidth >= 550) {
+          } else if (constraints.maxWidth >= 500) {
             columns = 2;
           } else {
             columns = 1;
           }
+          
+          const horizontalPadding = 48.0;
+          const crossAxisSpacing = 16.0;
+
+          final availableWidth = constraints.maxWidth -
+              horizontalPadding -
+              crossAxisSpacing * (columns - 1);
+          final itemWidth = availableWidth / columns;
+          final thumbnailHeight = itemWidth * 9 / 16;
+          final itemHeight = thumbnailHeight + 92;
 
           return GridView.builder(
-            padding:
-                const EdgeInsets.all(24),
-            gridDelegate:
-                SliverGridDelegateWithFixedCrossAxisCount(
+            padding: const EdgeInsets.all(24),
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: columns,
-              crossAxisSpacing: 16,
+              crossAxisSpacing: crossAxisSpacing,
               mainAxisSpacing: 16,
-              mainAxisExtent: 310,
+              mainAxisExtent: itemHeight,
             ),
             itemCount: _videos.length,
             itemBuilder: (_, index) =>
@@ -1070,116 +1080,6 @@ class _PlaceholderPage
   }
 }
 
-class FullscreenPlayerPage extends StatefulWidget {
-  final VideoPlayerController controller;
-
-  const FullscreenPlayerPage({
-    super.key,
-    required this.controller,
-  });
-
-  @override
-  State<FullscreenPlayerPage> createState() =>
-      _FullscreenPlayerPageState();
-}
-
-class _FullscreenPlayerPageState
-    extends State<FullscreenPlayerPage> {
-
-  bool _showControls = true;
-  Timer? _timer;
-
-  void _show() {
-    setState(() {
-      _showControls = true;
-    });
-
-    _timer?.cancel();
-
-    _timer = Timer(
-      const Duration(seconds: 3),
-      () {
-        if(mounted){
-          setState(() {
-            _showControls=false;
-          });
-        }
-      },
-    );
-  }
-
-
-  @override
-  void dispose(){
-    _timer?.cancel();
-    super.dispose();
-  }
-
-
-  @override
-  Widget build(BuildContext context){
-
-    final controller =
-        widget.controller;
-
-
-    return Scaffold(
-      backgroundColor: Colors.black,
-
-      body: Listener(
-        onPointerHover: (_) => _show(),
-        onPointerMove: (_) => _show(),
-        behavior: HitTestBehavior.opaque,
-        child: Stack(
-          fit: StackFit.expand,
-
-          children:[
-            
-            Center(
-              child: AspectRatio(
-                aspectRatio:
-                    controller.value.aspectRatio,
-
-                child:
-                    VideoPlayer(controller),
-              ),
-            ),
-
-
-            if(_showControls)
-
-              Positioned(
-                left:0,
-                right:0,
-                bottom:0,
-
-                child:
-                    Container(
-                      height:60,
-                      color:
-                          Colors.black87,
-
-                      child:
-                          const Center(
-                            child:
-                            Text(
-                              '全屏控制栏',
-                              style:
-                              TextStyle(
-                                color:
-                                Colors.white,
-                              ),
-                            ),
-                          ),
-                    ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class VideoDetailPage
     extends StatefulWidget {
   final String videoId;
@@ -1220,8 +1120,16 @@ class _VideoDetailPageState
 
   double _volume = 1.0;
 
+  bool _showVolumeSlider = false;
+  Timer? _volumeHideTimer;
   bool _showControls = true;
   Timer? _controlsTimer;
+
+  List<Map<String, dynamic>> _availableSources = [];
+  String _currentQuality = '';
+  bool _switchingQuality = false;
+  bool _progressHovering = false;
+  double _progressHoverRatio = 0.0;
 
   @override
   void initState() {
@@ -1261,6 +1169,18 @@ class _VideoDetailPageState
         );
 
         _playlist = playlist;
+
+        _availableSources =
+            List<Map<String, dynamic>>.from(
+          data['sources'] ?? [],
+        );
+
+        if (_availableSources.isNotEmpty) {
+          _currentQuality =
+              _availableSources.first['quality']
+                      ?.toString() ??
+                  '';
+        }
       });
 
       _scrollToCurrentVideo();
@@ -1407,6 +1327,69 @@ class _VideoDetailPageState
     }
   }
 
+  Future<void> _changeQuality(String newQuality) async {
+    if (_switchingQuality) {
+      return;
+    }
+
+    final source = _availableSources.firstWhere(
+      (s) => s['quality'] == newQuality,
+      orElse: () => <String, dynamic>{},
+    );
+
+    final newUrl = source['url']?.toString();
+
+    if (newUrl == null || newUrl.isEmpty) {
+      return;
+    }
+
+    final oldController = _videoPlayerController;
+
+    if (oldController == null) {
+      return;
+    }
+
+    final wasPlaying = oldController.value.isPlaying;
+    final position = oldController.value.position;
+
+    setState(() {
+      _currentQuality = newQuality;
+      _switchingQuality = true;
+    });
+
+    // 移除旧监听，避免 dispose 后仍被回调
+    oldController.removeListener(_onVideoPositionChanged);
+    oldController.removeListener(_onVideoCompleted);
+
+    // 先准备好新控制器（此时 UI 显示中转画面，不再引用旧控制器）
+    final newController = VideoPlayerController.networkUrl(
+      Uri.parse(newUrl),
+    );
+
+    await newController.initialize();
+    await newController.seekTo(position);
+    newController.setVolume(_volume);
+
+    newController.addListener(_onVideoPositionChanged);
+    newController.addListener(_onVideoCompleted);
+
+    _videoPlayerController = newController;
+
+    if (wasPlaying) {
+      await newController.play();
+    }
+
+    // 新控制器就绪后，才销毁旧的
+    await oldController.pause();
+    await oldController.dispose();
+
+    if (mounted) {
+      setState(() {
+        _switchingQuality = false;
+      });
+    }
+  }
+  
   Future<void>
       _restorePlaybackPosition() async {
     final controller =
@@ -1599,7 +1582,7 @@ class _VideoDetailPageState
       return;
     }
 
-    await Navigator.push(
+    await Navigator.pushReplacement(
       context,
       MaterialPageRoute(
         builder: (_) =>
@@ -1615,6 +1598,7 @@ class _VideoDetailPageState
     _savePlaybackPosition();
 
     _controlsTimer?.cancel();
+    _volumeHideTimer?.cancel();
 
     _videoPlayerController
         ?.removeListener(
@@ -1660,6 +1644,18 @@ class _VideoDetailPageState
   }
 
   Widget _buildVideoPlayer() {
+    if (_switchingQuality) {
+      return Container(
+        width: double.infinity,
+        height: 420,
+        color: Colors.black,
+        alignment: Alignment.center,
+        child: const CircularProgressIndicator(
+          color: Colors.white,
+        ),
+      );
+    }
+
     final controller =
         _videoPlayerController;
 
@@ -1691,15 +1687,19 @@ class _VideoDetailPageState
         maxHeight: MediaQuery.of(context).size.height * 0.7,
       ),
       child: AspectRatio(
-      aspectRatio:
-          controller.value
-              .aspectRatio,
+      aspectRatio: 16 / 9,
       child: Stack(
         fit: StackFit.expand,
         children: [
+          Container(color: Colors.black),
           MouseRegion(
             onHover: (_) => _showPlayerControls(),
-            child: VideoPlayer(controller),
+            child: Center(
+              child: AspectRatio(
+                aspectRatio: controller.value.aspectRatio,
+                child: VideoPlayer(controller),
+              ),
+            ),
           ),
           ValueListenableBuilder(
             valueListenable: controller,
@@ -1720,17 +1720,21 @@ class _VideoDetailPageState
               return Positioned(
                 left: 0,
                 right: 0,
-                bottom: _showControls ? 48 : 0,
+                bottom: 0,
                 child: IgnorePointer(
-                  child: LinearProgressIndicator(
-                    value:
-                        progress.clamp(0.0, 1.0),
-                    minHeight: 4,
-                    backgroundColor:
-                        Colors.white24,
-                    valueColor:
-                        const AlwaysStoppedAnimation<Color>(
-                      Colors.red,
+                  child: AnimatedOpacity(
+                    opacity: _showControls ? 0.0 : 1.0,
+                    duration: const Duration(milliseconds: 200),
+                    child: LinearProgressIndicator(
+                      value:
+                          progress.clamp(0.0, 1.0),
+                      minHeight: 4,
+                      backgroundColor:
+                          Colors.white24,
+                      valueColor:
+                          const AlwaysStoppedAnimation<Color>(
+                        Colors.red,
+                      ),
                     ),
                   ),
                 ),
@@ -1819,275 +1823,290 @@ class _VideoDetailPageState
     final position = controller.value.position;
     final duration = controller.value.duration;
 
-    return Container(
-      color: Colors.black87,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: Column(
-        children: [
-          VideoProgressIndicator(
-            controller,
-            allowScrubbing: true,
-            padding: const EdgeInsets.symmetric(vertical: 6),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IgnorePointer(
+          child: Container(
+            height: 16,
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.transparent,
+                  Colors.black54,
+                ],
+              ),
+            ),
           ),
-          Row(
+        ),
+        Container(
+          color: Colors.black54,
+          padding: const EdgeInsets.only(left: 4, right: 4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              IconButton(
-                color: Colors.white,
-                icon: Icon(
-                  controller.value.isPlaying
-                      ? Icons.pause
-                      : Icons.play_arrow,
-                ),
-                onPressed: () {
-                  setState(() {
-                    if (controller.value.isPlaying) {
-                      controller.pause();
-                    } else {
-                      controller.play();
-                      _showVideoCover = false;
-                    }
-                  });
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final trackWidth = constraints.maxWidth;
+
+                  return MouseRegion(
+                    onHover: (event) {
+                      final dx = event.localPosition.dx;
+                      final ratio = (dx / trackWidth).clamp(0.0, 1.0);
+
+                      if (!_progressHovering ||
+                          (_progressHoverRatio - ratio).abs() > 0.002) {
+                        setState(() {
+                          _progressHovering = true;
+                          _progressHoverRatio = ratio;
+                        });
+                      }
+                    },
+                    onExit: (_) {
+                      if (_progressHovering) {
+                        setState(() {
+                          _progressHovering = false;
+                        });
+                      }
+                    },
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        VideoProgressIndicator(
+                          controller,
+                          allowScrubbing: true,
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                        ),
+                        if (_progressHovering)
+                          Positioned(
+                            left: (trackWidth * _progressHoverRatio - 30)
+                                .clamp(0.0, trackWidth - 60),
+                            top: -26,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.85),
+                                borderRadius: BorderRadius.circular(3),
+                              ),
+                              child: Text(
+                                _formatDuration(
+                                  Duration(
+                                    milliseconds: (duration.inMilliseconds *
+                                            _progressHoverRatio)
+                                        .round(),
+                                  ),
+                                ),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  );
                 },
               ),
-              Text(
-                '${_formatDuration(position)} / ${_formatDuration(duration)}',
-                style: const TextStyle(color: Colors.white),
-              ),
-              const Spacer(),
-              IconButton(
-                color: Colors.white,
-                icon: Icon(
-                  _volume == 0
-                      ? Icons.volume_off
-                      : Icons.volume_up,
-                ),
-                onPressed: () {
-                  setState(() {
-                    _volume = _volume == 0 ? 1 : 0;
-                    controller.setVolume(_volume);
-                  });
-                },
-              ),
-              SizedBox(
-                width: 100,
-                child: Slider(
-                  value: _volume,
-                  min: 0,
-                  max: 1,
-                  onChanged: (value) {
-                    setState(() {
-                      _volume = value;
-                      controller.setVolume(value);
-                    });
-                  },
-                ),
-              ),
-              IconButton(
-                color: Colors.white,
-                icon: const Icon(Icons.fullscreen),
-                onPressed: _showFullscreenPlayer,
+              Row(
+                children: [
+                  IconButton(
+                    color: Colors.white,
+                    icon: Icon(
+                      controller.value.isPlaying
+                          ? Icons.pause
+                          : Icons.play_arrow,
+                    ),
+                    onPressed: () {
+                      setState(() {
+                        if (controller.value.isPlaying) {
+                          controller.pause();
+                        } else {
+                          controller.play();
+                          _showVideoCover = false;
+                        }
+                      });
+                    },
+                  ),
+                  MouseRegion(
+                    onEnter: (_) {
+                      _volumeHideTimer?.cancel();
+                      if (!_showVolumeSlider) {
+                        setState(() => _showVolumeSlider = true);
+                      }
+                    },
+                    onExit: (_) {
+                      _volumeHideTimer?.cancel();
+                      _volumeHideTimer = Timer(
+                        const Duration(milliseconds: 150),
+                        () {
+                          if (mounted && _showVolumeSlider) {
+                            setState(() => _showVolumeSlider = false);
+                          }
+                        },
+                      );
+                    },
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          color: Colors.white,
+                          icon: Icon(
+                            _volume == 0
+                                ? Icons.volume_off
+                                : Icons.volume_up,
+                          ),
+                          onPressed: () {
+                            setState(() {
+                              _volume = _volume == 0 ? 1 : 0;
+                              controller.setVolume(_volume);
+                            });
+                          },
+                        ),
+                        AnimatedSize(
+                          duration: const Duration(milliseconds: 200),
+                          curve: Curves.easeInOut,
+                          alignment: Alignment.centerLeft,
+                          child: _showVolumeSlider
+                              ? SizedBox(
+                                  width: 80,
+                                  height: 40,
+                                  child: SliderTheme(
+                                    data: SliderTheme.of(context).copyWith(
+                                      trackHeight: 2.0,
+                                      activeTrackColor: Colors.red,
+                                      inactiveTrackColor: Colors.white24,
+                                      thumbColor: Colors.red,
+                                      overlayColor:
+                                          Colors.red.withOpacity(0.2),
+                                      thumbShape:
+                                          const RoundSliderThumbShape(
+                                        enabledThumbRadius: 6.0,
+                                      ),
+                                      overlayShape:
+                                          const RoundSliderOverlayShape(
+                                        overlayRadius: 12.0,
+                                      ),
+                                    ),
+                                    child: Slider(
+                                      value: _volume,
+                                      min: 0,
+                                      max: 1,
+                                      onChanged: (value) {
+                                        setState(() {
+                                          _volume = value;
+                                          controller.setVolume(value);
+                                        });
+                                      },
+                                    ),
+                                  ),
+                                )
+                              : const SizedBox(width: 0, height: 40),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 4),
+                    child: Text(
+                      '${_formatDuration(position)} / ${_formatDuration(duration)}',
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ),
+                  const Spacer(),
+                  if (_availableSources.isNotEmpty)
+                    PopupMenuButton<String>(
+                      icon: const Icon(
+                        Icons.high_quality,
+                        color: Colors.white,
+                      ),
+                      tooltip: '选择画质',
+                      onSelected: _changeQuality,
+                      itemBuilder: (context) {
+                        return _availableSources.map((source) {
+                          final quality =
+                              source['quality']?.toString() ?? '';
+
+                          return PopupMenuItem<String>(
+                            value: quality,
+                            child: Row(
+                              children: [
+                                if (quality == _currentQuality)
+                                  const Icon(
+                                    Icons.check,
+                                    size: 18,
+                                    color: Colors.green,
+                                  )
+                                else
+                                  const SizedBox(width: 18),
+                                const SizedBox(width: 8),
+                                Text(quality),
+                              ],
+                            ),
+                          );
+                        }).toList();
+                      },
+                    ),
+                  IconButton(
+                    color: Colors.white,
+                    icon: const Icon(Icons.fullscreen),
+                    onPressed: _showFullscreenPlayer,
+                  ),
+                ],
               ),
             ],
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
-Future<void> _showFullscreenPlayer() async {
-  final controller =
-      _videoPlayerController;
+  Future<void> _showFullscreenPlayer() async {
+    final controller = _videoPlayerController;
 
-  if (controller == null ||
-      !controller.value.isInitialized) {
-    return;
-  }
+    if (controller == null || !controller.value.isInitialized) {
+      return;
+    }
 
-  await windowManager.setFullScreen(true);
+    await windowManager.setFullScreen(true);
 
-  await Navigator.push(
-    context,
-    MaterialPageRoute(
-      builder: (_) {
-        return StatefulBuilder(
-          builder: (
-            context,
-            setFullState,
-          ) {
-            bool showControls = true;
-            Timer? timer;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _FullscreenPlayerPage(
+          controller: controller,
+          availableSources: _availableSources,
+          currentQuality: _currentQuality,
+          volume: _volume,
+          onControllerChanged: (newController, newQuality) {
+            if (!mounted) return;
 
-            void show() {
-              setFullState(() {
-                showControls = true;
-              });
+            setState(() {
+              _videoPlayerController = newController;
+              _currentQuality = newQuality;
+            });
 
-              timer?.cancel();
-
-              timer = Timer(
-                const Duration(seconds: 3),
-                () {
-                  setFullState(() {
-                    showControls = false;
-                  });
-                },
-              );
-            }
-
-            return Scaffold(
-              backgroundColor:
-                  Colors.black,
-              body: MouseRegion(
-                onHover: (_) {
-                  show();
-                },
-
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-
-                    Center(
-                      child: AspectRatio(
-                        aspectRatio:
-                            controller.value.aspectRatio,
-                        child:
-                            VideoPlayer(
-                          controller,
-                        ),
-                      ),
-                    ),
-
-
-                    // 底部常驻细进度条
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child:
-                          VideoProgressIndicator(
-                        controller,
-                        allowScrubbing:
-                            false,
-                        colors:
-                            const VideoProgressColors(
-                          playedColor:
-                              Colors.red,
-                          bufferedColor:
-                              Colors.white38,
-                          backgroundColor:
-                              Colors.white24,
-                        ),
-                        padding:
-                            EdgeInsets.zero,
-                      ),
-                    ),
-
-
-                    if (showControls)
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        child: Container(
-                          color:
-                              Colors.black87,
-                          padding:
-                              const EdgeInsets.all(8),
-                          child: Row(
-                            children: [
-
-                              IconButton(
-                                color:
-                                    Colors.white,
-                                icon: Icon(
-                                  controller
-                                          .value
-                                          .isPlaying
-                                      ? Icons.pause
-                                      : Icons.play_arrow,
-                                ),
-                                onPressed: () {
-                                  setFullState(() {
-                                    if (controller
-                                        .value
-                                        .isPlaying) {
-                                      controller.pause();
-                                    } else {
-                                      controller.play();
-                                    }
-                                  });
-                                },
-                              ),
-
-
-                              Expanded(
-                                child:
-                                    VideoProgressIndicator(
-                                  controller,
-                                  allowScrubbing:
-                                      true,
-                                ),
-                              ),
-
-
-                              IconButton(
-                                color:
-                                    Colors.white,
-                                icon:
-                                    const Icon(
-                                  Icons.fullscreen_exit,
-                                ),
-                                onPressed:
-                                    () async {
-                                  await windowManager
-                                      .setFullScreen(
-                                          false);
-
-                                  Navigator.pop(
-                                      context);
-                                },
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-
-
-                    Positioned(
-                      top: 20,
-                      left: 20,
-                      child:
-                          IconButton(
-                        color:
-                            Colors.white,
-                        icon:
-                            const Icon(
-                          Icons.arrow_back,
-                          size: 32,
-                        ),
-                        onPressed:
-                            () async {
-                          await windowManager
-                              .setFullScreen(
-                                  false);
-
-                          Navigator.pop(
-                              context);
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
+            newController.addListener(_onVideoPositionChanged);
+            newController.addListener(_onVideoCompleted);
           },
-        );
-      },
-    ),
-  );
+          onVolumeChanged: (newVolume) {
+            if (!mounted) return;
 
-  await windowManager.setFullScreen(false);
-}
+            setState(() {
+              _volume = newVolume;
+            });
+          },
+        ),
+      ),
+    );
+
+    await windowManager.setFullScreen(false);
+  }
   void _scrollToCurrentVideo() {
     final key =
         _playlistKeys[widget.videoId];
@@ -2640,6 +2659,485 @@ class _InfoRow
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+
+class _FullscreenPlayerPage extends StatefulWidget {
+  final VideoPlayerController controller;
+  final List<Map<String, dynamic>> availableSources;
+  final String currentQuality;
+  final double volume;
+  final void Function(VideoPlayerController, String) onControllerChanged;
+  final ValueChanged<double> onVolumeChanged;
+
+  const _FullscreenPlayerPage({
+    required this.controller,
+    required this.availableSources,
+    required this.currentQuality,
+    required this.volume,
+    required this.onControllerChanged,
+    required this.onVolumeChanged,
+  });
+
+  @override
+  State<_FullscreenPlayerPage> createState() =>
+      _FullscreenPlayerPageState();
+}
+
+class _FullscreenPlayerPageState
+    extends State<_FullscreenPlayerPage> {
+  late VideoPlayerController _controller;
+  late List<Map<String, dynamic>> _availableSources;
+  late String _currentQuality;
+  late double _volume;
+
+  bool _showControls = true;
+  bool _showVolumeSlider = false;
+  bool _switchingQuality = false;
+  bool _progressHovering = false;
+  double _progressHoverRatio = 0.0;
+  Timer? _controlsTimer;
+  Timer? _volumeHideTimer;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _controller = widget.controller;
+    _availableSources = widget.availableSources;
+    _currentQuality = widget.currentQuality;
+    _volume = widget.volume;
+
+    _controller.addListener(_onControllerTick);
+
+    _restartHideTimer();
+  }
+
+  void _onControllerTick() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _restartHideTimer() {
+    _controlsTimer?.cancel();
+    _controlsTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) {
+        setState(() => _showControls = false);
+      }
+    });
+  }
+
+  void _onMouseMove() {
+    if (!_showControls) {
+      setState(() => _showControls = true);
+    }
+    _restartHideTimer();
+  }
+
+  @override
+  void dispose() {
+    _controlsTimer?.cancel();
+    _volumeHideTimer?.cancel();
+    _controller.removeListener(_onControllerTick);
+    super.dispose();
+  }
+
+  Future<void> _exitFullscreen() async {
+    await windowManager.setFullScreen(false);
+
+    if (mounted) {
+      Navigator.pop(context);
+    }
+  }
+
+  String _formatDuration(Duration duration) {
+    final minutes =
+        duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds =
+        duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final hours = duration.inHours;
+
+    if (hours > 0) {
+      return '$hours:$minutes:$seconds';
+    }
+
+    return '$minutes:$seconds';
+  }
+
+  Future<void> _changeQuality(String newQuality) async {
+    if (_switchingQuality || newQuality == _currentQuality) {
+      return;
+    }
+
+    final source = _availableSources.firstWhere(
+      (s) => s['quality'] == newQuality,
+      orElse: () => <String, dynamic>{},
+    );
+
+    final newUrl = source['url']?.toString();
+
+    if (newUrl == null || newUrl.isEmpty) {
+      return;
+    }
+
+    final oldController = _controller;
+    final wasPlaying = oldController.value.isPlaying;
+    final position = oldController.value.position;
+
+    setState(() {
+      _currentQuality = newQuality;
+      _switchingQuality = true;
+    });
+
+    oldController.removeListener(_onControllerTick);
+
+    final newController = VideoPlayerController.networkUrl(
+      Uri.parse(newUrl),
+    );
+
+    await newController.initialize();
+    await newController.seekTo(position);
+    newController.setVolume(_volume);
+
+    _controller = newController;
+    newController.addListener(_onControllerTick);
+
+    widget.onControllerChanged(newController, newQuality);
+
+    if (wasPlaying) {
+      await newController.play();
+    }
+
+    await oldController.pause();
+    await oldController.dispose();
+
+    if (mounted) {
+      setState(() {
+        _switchingQuality = false;
+      });
+    }
+  }
+
+
+  Widget _buildControls() {
+    final position = _controller.value.position;
+    final duration = _controller.value.duration;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // 视频到控制栏的渐变过渡层
+        IgnorePointer(
+          child: Container(
+            height: 16,
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.transparent,
+                  Colors.black54,
+                ],
+              ),
+            ),
+          ),
+        ),
+        // 控制栏本体
+        Container(
+          color: Colors.black54,
+          padding: const EdgeInsets.only(left: 4, right: 4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final trackWidth = constraints.maxWidth;
+
+                  return MouseRegion(
+                    onHover: (event) {
+                      final dx = event.localPosition.dx;
+                      final ratio = (dx / trackWidth).clamp(0.0, 1.0);
+
+                      if (!_progressHovering ||
+                          (_progressHoverRatio - ratio).abs() > 0.002) {
+                        setState(() {
+                          _progressHovering = true;
+                          _progressHoverRatio = ratio;
+                        });
+                      }
+                    },
+                    onExit: (_) {
+                      if (_progressHovering) {
+                        setState(() {
+                          _progressHovering = false;
+                        });
+                      }
+                    },
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        VideoProgressIndicator(
+                          _controller,
+                          allowScrubbing: true,
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                        ),
+                        if (_progressHovering)
+                          Positioned(
+                            left: (trackWidth * _progressHoverRatio - 30)
+                                .clamp(0.0, trackWidth - 60),
+                            top: -26,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.85),
+                                borderRadius: BorderRadius.circular(3),
+                              ),
+                              child: Text(
+                                _formatDuration(
+                                  Duration(
+                                    milliseconds: (duration.inMilliseconds *
+                                            _progressHoverRatio)
+                                        .round(),
+                                  ),
+                                ),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+              Row(
+                children: [
+                  IconButton(
+                    color: Colors.white,
+                    icon: Icon(
+                      _controller.value.isPlaying
+                          ? Icons.pause
+                          : Icons.play_arrow,
+                    ),
+                    onPressed: () {
+                      setState(() {
+                        if (_controller.value.isPlaying) {
+                          _controller.pause();
+                        } else {
+                          _controller.play();
+                        }
+                      });
+                      _restartHideTimer();
+                    },
+                  ),
+                  MouseRegion(
+                    onEnter: (_) {
+                      _volumeHideTimer?.cancel();
+                      if (!_showVolumeSlider) {
+                        setState(() => _showVolumeSlider = true);
+                      }
+                    },
+                    onExit: (_) {
+                      _volumeHideTimer?.cancel();
+                      _volumeHideTimer = Timer(
+                        const Duration(milliseconds: 150),
+                        () {
+                          if (mounted && _showVolumeSlider) {
+                            setState(() => _showVolumeSlider = false);
+                          }
+                        },
+                      );
+                    },
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          color: Colors.white,
+                          icon: Icon(
+                            _volume == 0
+                                ? Icons.volume_off
+                                : Icons.volume_up,
+                          ),
+                          onPressed: () {
+                            setState(() {
+                              _volume = _volume == 0 ? 1 : 0;
+                              _controller.setVolume(_volume);
+                              widget.onVolumeChanged(_volume);
+                            });
+                          },
+                        ),
+                        AnimatedSize(
+                          duration: const Duration(milliseconds: 200),
+                          curve: Curves.easeInOut,
+                          alignment: Alignment.centerLeft,
+                          child: _showVolumeSlider
+                              ? SizedBox(
+                                  width: 80,
+                                  height: 40,
+                                  child: SliderTheme(
+                                    data: SliderTheme.of(context).copyWith(
+                                      trackHeight: 2.0,
+                                      activeTrackColor: Colors.red,
+                                      inactiveTrackColor: Colors.white24,
+                                      thumbColor: Colors.red,
+                                      overlayColor:
+                                          Colors.red.withOpacity(0.2),
+                                      thumbShape:
+                                          const RoundSliderThumbShape(
+                                        enabledThumbRadius: 6.0,
+                                      ),
+                                      overlayShape:
+                                          const RoundSliderOverlayShape(
+                                        overlayRadius: 12.0,
+                                      ),
+                                    ),
+                                    child: Slider(
+                                      value: _volume,
+                                      min: 0,
+                                      max: 1,
+                                      onChanged: (value) {
+                                        setState(() {
+                                          _volume = value;
+                                          _controller.setVolume(value);
+                                          widget.onVolumeChanged(value);
+                                        });
+                                      },
+                                    ),
+                                  ),
+                                )
+                              : const SizedBox(width: 0, height: 40),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 4),
+                    child: Text(
+                      '${_formatDuration(position)} / ${_formatDuration(duration)}',
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ),
+                  const Spacer(),
+                  if (_availableSources.isNotEmpty)
+                    PopupMenuButton<String>(
+                      icon: const Icon(
+                        Icons.high_quality,
+                        color: Colors.white,
+                      ),
+                      tooltip: '选择画质',
+                      onSelected: _changeQuality,
+                      itemBuilder: (context) {
+                        return _availableSources.map((source) {
+                          final quality =
+                              source['quality']?.toString() ?? '';
+
+                          return PopupMenuItem<String>(
+                            value: quality,
+                            child: Row(
+                              children: [
+                                if (quality == _currentQuality)
+                                  const Icon(
+                                    Icons.check,
+                                    size: 18,
+                                    color: Colors.green,
+                                  )
+                                else
+                                  const SizedBox(width: 18),
+                                const SizedBox(width: 8),
+                                Text(quality),
+                              ],
+                            ),
+                          );
+                        }).toList();
+                      },
+                    ),
+                  IconButton(
+                    color: Colors.white,
+                    icon: const Icon(Icons.fullscreen_exit),
+                    onPressed: _exitFullscreen,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: MouseRegion(
+        onHover: (_) => _onMouseMove(),
+        onEnter: (_) => _onMouseMove(),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Center(
+              child: AspectRatio(
+                aspectRatio: _controller.value.aspectRatio,
+                child: _switchingQuality
+                    ? Container(
+                        color: Colors.black,
+                        alignment: Alignment.center,
+                        child: const CircularProgressIndicator(
+                          color: Colors.white,
+                        ),
+                      )
+                    : VideoPlayer(_controller),
+              ),
+            ),
+
+            // 底部常驻细进度条（控制栏出现时淡出）
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: IgnorePointer(
+                child: AnimatedOpacity(
+                  opacity: _showControls ? 0.0 : 1.0,
+                  duration: const Duration(milliseconds: 200),
+                  child: VideoProgressIndicator(
+                    _controller,
+                    allowScrubbing: false,
+                    colors: const VideoProgressColors(
+                      playedColor: Colors.red,
+                      bufferedColor: Colors.white38,
+                      backgroundColor: Colors.white24,
+                    ),
+                    padding: EdgeInsets.zero,
+                  ),
+                ),
+              ),
+            ),
+
+            // 底部控制栏（淡入淡出）
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: AnimatedOpacity(
+                opacity: _showControls ? 1.0 : 0.0,
+                duration: const Duration(milliseconds: 200),
+                child: IgnorePointer(
+                  ignoring: !_showControls,
+                  child: _buildControls(),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

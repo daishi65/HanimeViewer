@@ -35,8 +35,11 @@ class ChromeCDP:
         # 如果没有普通网页，则使用第一个 page
         return pages[0]["webSocketDebuggerUrl"]
 
-    def evaluate(self, expression):
-        ws = websocket.create_connection(self.ws_url)
+    def evaluate(self, expression, timeout=15):
+        ws = websocket.create_connection(
+            self.ws_url,
+            timeout=timeout
+        )
 
         command = {
             "id": 1,
@@ -49,13 +52,17 @@ class ChromeCDP:
 
         ws.send(json.dumps(command))
 
-        while True:
-            message = json.loads(ws.recv())
+        try:
+            while True:
+                message = json.loads(ws.recv())
 
-            if message.get("id") == 1:
-                ws.close()
-                return message["result"]["result"]
-
+                if message.get("id") == 1:
+                    ws.close()
+                    return message["result"]["result"]
+        except Exception:
+            ws.close()
+            raise
+        
     def get_title(self):
         result = self.evaluate("document.title")
         return result.get("value")

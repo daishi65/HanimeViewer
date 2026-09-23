@@ -56,7 +56,7 @@ class HanimeParser:
 
         return result
 
-    def get_video_cards(self, limit=10):
+    def get_video_cards(self, limit=None):
         result = []
 
         cards = self.soup.find_all("a", class_="video-link")
@@ -106,9 +106,9 @@ class HanimeParser:
 
             result.append(video_card)
 
-            if len(result) >= limit:
+            if limit is not None and len(result) >= limit:
                 break
-
+            
         return result
 
     def get_playlists(self, limit=None):
@@ -372,6 +372,51 @@ class HanimeParser:
 
         return None
 
+    def get_video_sources(self):
+        # 返回页面中所有 <source> 标签对应的画质列表
+        # 格式：[{"url": "...", "quality": "1080p"}, ...]
+        # 按清晰度从高到低排序
+        sources = []
+
+        video = self.soup.find("video")
+
+        if not video:
+            return sources
+
+        source_tags = video.find_all("source")
+
+        for source_tag in source_tags:
+            src = source_tag.get("src")
+            size = source_tag.get("size")
+
+            if not src:
+                continue
+
+            if size:
+                quality = f"{size}p"
+            else:
+                import re
+                match = re.search(r"-(\d+p)\.mp4", src)
+                if match:
+                    quality = match.group(1)
+                else:
+                    quality = "unknown"
+
+            sources.append({
+                "url": self.clean_url(src),
+                "quality": quality
+            })
+
+        def quality_number(item):
+            text = item["quality"].rstrip("p")
+            if text.isdigit():
+                return int(text)
+            return 0
+
+        sources.sort(key=quality_number, reverse=True)
+
+        return sources
+
     def get_thumbnail(self):
         # 优先寻找 Open Graph 图片
         og_image = self.soup.find(
@@ -498,5 +543,6 @@ class HanimeParser:
             brand=self.get_brand(),
             release_date=self.get_release_date(),
             file_size=self.get_file_size(),
-            tags=self.get_tags()
+            tags=self.get_tags(),
+            sources=self.get_video_sources()
         )
