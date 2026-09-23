@@ -216,9 +216,41 @@ class ChromeCDP:
         )
 
 
-        # 等待跳转完成
+        # 等待页面跳转和 Cloudflare 验证
 
-        time.sleep(3)
+        print(
+            "等待页面稳定..."
+        )
+
+        for i in range(15):
+
+            time.sleep(2)
+
+            current_url = self.get_url()
+            title = self.get_title()
+
+            print(
+                f"等待 {i+1}/15"
+            )
+
+            print(
+                current_url
+            )
+
+            print(
+                title
+            )
+
+
+            # 已经进入正常网页
+
+            if (
+                "Hanime1.me" in title
+                and
+                "Just a moment" not in title
+            ):
+                break
+
 
         print(
             "跳转后 URL:"

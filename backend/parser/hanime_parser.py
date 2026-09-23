@@ -147,7 +147,16 @@ class HanimeParser:
         print("=======================")
 
 
+        print(
+            "前5个div:"
+        )
+
+        for div in self.soup.find_all("div")[:5]:
+            print(div)
+
+
         return []
+    
     def get_playlists(self, limit=None):
         result = []
 
