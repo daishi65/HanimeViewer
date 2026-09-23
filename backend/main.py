@@ -85,6 +85,160 @@ def home_videos():
             detail=str(exc)
         )
 
+@app.get("/api/home_sections")
+def home_sections():
+    url = "https://hanime1.me/"
+
+    try:
+        chrome = ChromeCDP()
+
+        print("准备打开首页（栏目模式）:")
+        print(url)
+
+        chrome.navigate(url)
+
+        print("等待页面加载...")
+        time.sleep(5)
+
+        html = chrome.get_html()
+
+        print("HTML 长度:")
+        print(len(html))
+
+        parser = HanimeParser(html)
+
+        sections = parser.get_home_sections()
+
+        print("栏目数量:")
+        print(len(sections))
+
+        for section in sections:
+            print(
+                f"  {section['name']}: "
+                f"{len(section['videos'])} 个视频"
+            )
+
+        result = []
+
+        for section in sections:
+            result.append({
+                "name": section["name"],
+                "url": section.get("url", ""),                
+                "videos": [
+                    {
+                        "title": v.title,
+                        "url": v.url,
+                        "thumbnail": v.thumbnail,
+                        "duration": v.duration,
+                        "rating": v.rating,
+                        "views": v.views
+                    }
+                    for v in section["videos"]
+                ]
+            })
+
+        return {"sections": result}
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+@app.get("/api/filter")
+def filter_videos(
+    genre: str = "",
+    sort: str = "",
+    date: str = "",
+    duration: str = "",
+    page: int = 1
+):
+    try:
+        if not genre and not sort:
+            raise HTTPException(
+                status_code=400,
+                detail="genre 和 sort 至少需要一个"
+            )
+
+        if page < 1:
+            page = 1
+
+        from urllib.parse import urlencode
+
+        # 官网用完整参数集，缺任何一个空参数都会导致服务器解析异常
+        params = {
+            "query": "",
+            "type": "",
+            "genre": genre,
+            "sort": sort,
+            "date": date,
+            "duration": duration,
+        }
+
+        if page > 1:
+            params["page"] = str(page)
+
+        query_string = urlencode(params)
+
+        url = f"https://hanime1.me/search?{query_string}"
+
+        print("准备打开筛选页面:")
+        print(url)
+
+        chrome = ChromeCDP()
+
+        chrome.navigate(url)
+
+        print("等待页面加载...")
+        time.sleep(5)
+
+        html = chrome.get_html()
+
+        print("HTML 长度:")
+        print(len(html))
+
+        parser = HanimeParser(html)
+
+        cards = parser.get_search_results()
+
+        total_pages = parser.get_search_total_pages()
+
+        print("解析到的视频数量:")
+        print(len(cards))
+
+        print("总页数:")
+        print(total_pages)
+
+        results = []
+
+        for card in cards:
+            results.append({
+                "title": card.title,
+                "url": card.url,
+                "thumbnail": card.thumbnail,
+                "duration": card.duration,
+                "rating": card.rating,
+                "views": card.views
+            })
+
+        return {
+            "genre": genre,
+            "sort": sort,
+            "date": date,
+            "duration": duration,
+            "page": page,
+            "total_pages": total_pages,
+            "results": results
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
 
 @app.get("/api/search")
 def search_videos(query: str):

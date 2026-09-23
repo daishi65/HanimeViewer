@@ -56,61 +56,67 @@ class HanimeParser:
 
         return result
 
+    def _parse_video_link(self, card):
+        url = self.clean_url(card.get("href"))
+
+        img = card.find("img", class_="main-thumb")
+
+        if not img:
+            return None
+
+        thumbnail = self.clean_url(img.get("src"))
+
+        title_box = card.find("div", class_="title")
+        title = title_box.get_text(strip=True) if title_box else ""
+
+        duration_box = card.find("div", class_="duration")
+        duration = duration_box.get_text(strip=True) if duration_box else ""
+
+        stat_items = card.find_all("div", class_="stat-item")
+
+        rating = ""
+        views = ""
+
+        if len(stat_items) >= 1:
+            rating_box = stat_items[0]
+
+            icon = rating_box.find("i", class_="material-icons")
+
+            if icon:
+                icon.extract()
+
+            rating = rating_box.get_text(strip=True)
+
+        if len(stat_items) >= 2:
+            views = stat_items[1].get_text(strip=True)
+
+        return VideoCard(
+            title=title,
+            url=url,
+            thumbnail=thumbnail,
+            duration=duration,
+            rating=rating,
+            views=views
+        )
+
     def get_video_cards(self, limit=None):
         result = []
 
         cards = self.soup.find_all("a", class_="video-link")
 
         for card in cards:
-            url = self.clean_url(card.get("href"))
+            video_card = self._parse_video_link(card)
 
-            img = card.find("img", class_="main-thumb")
-
-            if not img:
+            if not video_card:
                 continue
-
-            thumbnail = self.clean_url(img.get("src"))
-
-            title_box = card.find("div", class_="title")
-            title = title_box.get_text(strip=True) if title_box else ""
-
-            duration_box = card.find("div", class_="duration")
-            duration = duration_box.get_text(strip=True) if duration_box else ""
-
-            stat_items = card.find_all("div", class_="stat-item")
-
-            rating = ""
-            views = ""
-
-            if len(stat_items) >= 1:
-                rating_box = stat_items[0]
-
-                icon = rating_box.find("i", class_="material-icons")
-
-                if icon:
-                    icon.extract()
-
-                rating = rating_box.get_text(strip=True)
-
-            if len(stat_items) >= 2:
-                views = stat_items[1].get_text(strip=True)
-
-            video_card = VideoCard(
-                title=title,
-                url=url,
-                thumbnail=thumbnail,
-                duration=duration,
-                rating=rating,
-                views=views
-            )
 
             result.append(video_card)
 
             if limit is not None and len(result) >= limit:
                 break
-            
-        return result
 
+        return result
+        
     def get_playlists(self, limit=None):
         result = []
 
@@ -546,3 +552,205 @@ class HanimeParser:
             tags=self.get_tags(),
             sources=self.get_video_sources()
         )
+
+    def get_search_total_pages(self):
+        from urllib.parse import urlparse, parse_qs
+
+        paginations = self.soup.find_all(
+            "div",
+            class_="search-pagination"
+        )
+
+        print(f"[分页] 找到 {len(paginations)} 个分页区域")
+
+        max_page = 1
+
+        for pagination in paginations:
+            for a in pagination.find_all(
+                "a",
+                class_="page-link",
+                href=True
+            ):
+                href = a.get("href", "")
+
+                if "page=" not in href:
+                    continue
+
+                try:
+                    parsed = urlparse(href)
+                    params = parse_qs(parsed.query)
+                    page_num = int(
+                        params.get("page", ["0"])[0]
+                    )
+
+                    if page_num > max_page:
+                        max_page = page_num
+
+                except (ValueError, IndexError):
+                    continue
+
+        print(f"[分页] 最大页码 = {max_page}")
+
+        return max_page
+    
+    def get_search_results(self):
+        # 搜索结果页有两种结构：
+        # 1. sort 页面（?sort=xxx）和首页栏目结构相同，用 video-link
+        # 2. genre 页面（?genre=xxx）用 a > div.video-card-inner 结构
+        # 先试 sort 结构，如果找不到视频再试 genre 结构
+
+        result = []
+
+        # 模式 1：video-link（sort 页面、首页栏目）
+        cards = self.soup.find_all("a", class_="video-link")
+
+        for card in cards:
+            video_card = self._parse_video_link(card)
+
+            if not video_card:
+                continue
+
+            if not video_card.url.startswith(
+                "https://hanime1.me/watch?"
+            ):
+                continue
+
+            result.append(video_card)
+
+        if result:
+            return result
+
+        # 模式 2：video-card-inner（genre 页面）
+        for a in self.soup.find_all("a", href=True):
+            href = self.clean_url(a.get("href"))
+
+            if not href:
+                continue
+
+            if not href.startswith(
+                "https://hanime1.me/watch?"
+            ):
+                continue
+
+            card = a.find("div", class_="video-card-inner")
+
+            if not card:
+                continue
+
+            img = card.find("img")
+
+            if not img:
+                continue
+
+            thumbnail = self.clean_url(img.get("src"))
+
+            title_box = card.find(
+                "div",
+                class_="home-rows-videos-title"
+            )
+
+            title = (
+                title_box.get_text(strip=True)
+                if title_box
+                else ""
+            )
+
+            if not title:
+                continue
+
+            result.append(VideoCard(
+                title=title,
+                url=href,
+                thumbnail=thumbnail,
+                duration="",
+                rating="",
+                views=""
+            ))
+
+        return result
+    
+    def get_home_sections(self):
+        # 首页栏目结构：
+        # <a class="horizontal-row-title">
+        #   <h3>最新上市...查看更多</h3>
+        # </a>
+        # <div class="home-rows-videos-wrapper ...">
+        #   <div class="video-item-container">...</div>
+        # </div>
+        # ...
+
+        from bs4 import NavigableString
+
+        sections = []
+
+        container = self.soup.find(
+            "div",
+            class_="home-rows-section-margin-top"
+        )
+
+        if not container:
+            return sections
+
+        current_name = None
+        current_url = None
+        current_videos = []
+
+        elements = container.find_all(
+            ["a", "div"],
+            class_=["horizontal-row-title", "home-rows-videos-wrapper"]
+        )
+
+        for el in elements:
+            classes = el.get("class", [])
+
+            if "horizontal-row-title" in classes:
+                if current_name is not None:
+                    sections.append({
+                        "name": current_name,
+                        "url": current_url,
+                        "videos": current_videos
+                    })
+
+                current_url = self.clean_url(el.get("href"))
+
+                h3 = el.find("h3")
+
+                current_name = ""
+
+                if h3:
+                    for child in h3.children:
+                        if isinstance(child, NavigableString):
+                            t = child.strip()
+
+                            if t:
+                                current_name = t
+                                break
+
+                current_videos = []
+
+            elif "home-rows-videos-wrapper" in classes:
+                for video_container in el.find_all(
+                    "div",
+                    class_="video-item-container"
+                ):
+                    link = video_container.find(
+                        "a",
+                        class_="video-link"
+                    )
+
+                    if not link:
+                        continue
+
+                    video_card = self._parse_video_link(link)
+
+                    if video_card:
+                        current_videos.append(video_card)
+
+        if current_name is not None:
+            sections.append({
+                "name": current_name,
+                "url": current_url,
+                "videos": current_videos
+            })
+
+        return sections

@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'playlist_page.dart';
+import 'category_page.dart';
 import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
 import 'package:video_player_win/video_player_win.dart';
@@ -46,7 +47,28 @@ class MainShell extends StatefulWidget {
 class _MainShellState extends State<MainShell> {
   _MainSection _section = _MainSection.home;
 
+  Map<String, String>? _categoryView;
+
+  static const List<Map<String, String>> _categoryOptions = [
+    {'name': '最新上市', 'genre': '', 'sort': '最新上市'},
+    {'name': '最新上傳', 'genre': '', 'sort': '最新上傳'},
+    {'name': '裏番', 'genre': '裏番', 'sort': ''},
+    {'name': '泡麵番', 'genre': '泡麵番', 'sort': ''},
+    {'name': 'Motion Anime', 'genre': 'Motion Anime', 'sort': ''},
+    {'name': '3DCG', 'genre': '3DCG', 'sort': ''},
+    {'name': '2.5D動畫', 'genre': '2.5D', 'sort': ''},
+    {'name': '2D動畫', 'genre': '2D動畫', 'sort': ''},
+    {'name': 'AI生成', 'genre': 'AI生成', 'sort': ''},
+    {'name': 'MMD', 'genre': 'MMD', 'sort': ''},
+    {'name': 'Cosplay', 'genre': 'Cosplay', 'sort': ''},
+    {'name': '他們在看', 'genre': '', 'sort': '他們在看'},
+  ];
+
   String get _title {
+    if (_categoryView != null) {
+      return _categoryView!['title'] ?? '';
+    }
+
     switch (_section) {
       case _MainSection.home:
         return '首页';
@@ -64,16 +86,110 @@ class _MainShellState extends State<MainShell> {
   }
 
   void _select(_MainSection section) {
-    setState(() => _section = section);
+    setState(() {
+      _section = section;
+      _categoryView = null;
+    });
     if (MediaQuery.sizeOf(context).width < 800) {
       Navigator.of(context).maybePop();
     }
   }
 
+  void _openCategory(String title, String genre, String sort) {
+    setState(() {
+      _categoryView = {
+        'title': title,
+        'genre': genre,
+        'sort': sort,
+      };
+    });
+  }
+
+  void _closeCategory() {
+    setState(() => _categoryView = null);
+  }
+
+  void _switchCategory(String name, String genre, String sort) {
+    setState(() {
+      _categoryView = {
+        'title': name,
+        'genre': genre,
+        'sort': sort,
+      };
+    });
+  }
+
+  Widget _buildAppBarTitle() {
+    if (_categoryView == null) {
+      return Text(_title);
+    }
+
+    final currentGenre = _categoryView!['genre'] ?? '';
+    final currentSort = _categoryView!['sort'] ?? '';
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(_categoryView!['title'] ?? ''),
+        PopupMenuButton<String>(
+          icon: const Icon(Icons.arrow_drop_down),
+          tooltip: '切换栏目',
+          onSelected: (selectedName) {
+            final selected = _categoryOptions.firstWhere(
+              (o) => o['name'] == selectedName,
+            );
+
+            _switchCategory(
+              selected['name']!,
+              selected['genre']!,
+              selected['sort']!,
+            );
+          },
+          itemBuilder: (context) {
+            return _categoryOptions.map((opt) {
+              final isCurrent =
+                  opt['genre'] == currentGenre &&
+                      opt['sort'] == currentSort;
+
+              return PopupMenuItem<String>(
+                value: opt['name'],
+                child: Row(
+                  children: [
+                    if (isCurrent)
+                      const Icon(
+                        Icons.check,
+                        size: 18,
+                        color: Colors.green,
+                      )
+                    else
+                      const SizedBox(width: 18),
+                    const SizedBox(width: 8),
+                    Text(opt['name']!),
+                  ],
+                ),
+              );
+            }).toList();
+          },
+        ),
+      ],
+    );
+  }
+
   Widget _buildPage() {
+    if (_categoryView != null) {
+      return CategoryPage(
+        key: ValueKey(
+          '${_categoryView!['title']}_${_categoryView!['genre']}_${_categoryView!['sort']}',
+        ),
+        title: _categoryView!['title']!,
+        genre: _categoryView!['genre']!,
+        sort: _categoryView!['sort']!,
+      );
+    }
+
     switch (_section) {
       case _MainSection.home:
-        return const HomePage();
+        return HomePage(onOpenCategory: _openCategory);        
       case _MainSection.search:
         return const SearchPage();
       case _MainSection.history:
@@ -210,12 +326,19 @@ class _MainShellState extends State<MainShell> {
               child: Column(
                 children: [
                   AppBar(
-                    title: Text(_title),
+                    title: _buildAppBarTitle(),
+                    automaticallyImplyLeading: false,
+                    leading: _categoryView != null
+                        ? IconButton(
+                            icon: const Icon(Icons.arrow_back),
+                            onPressed: _closeCategory,
+                          )
+                        : null,
                   ),
                   Expanded(
                     child: _buildPage(),
                   ),
-                ],
+                ],                
               ),
             ),
           ],
@@ -225,18 +348,30 @@ class _MainShellState extends State<MainShell> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_title),
+        title: _buildAppBarTitle(),
+        leading: _categoryView != null
+            ? IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: _closeCategory,
+              )
+            : null,
       ),
       drawer: Drawer(
         child: _buildNavigation(drawer: true),
       ),
       body: _buildPage(),
-    );
+    );    
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  final void Function(String title, String genre, String sort)?
+      onOpenCategory;
+
+  const HomePage({
+    super.key,
+    this.onOpenCategory,
+  });
 
   @override
   State<HomePage> createState() =>
@@ -244,7 +379,7 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  List<Map<String, dynamic>> _videos = [];
+  List<Map<String, dynamic>> _sections = [];
   bool _loading = true;
   String? _error;
 
@@ -263,7 +398,7 @@ class _HomePageState extends State<HomePage> {
     try {
       final response = await http.get(
         Uri.parse(
-          'http://127.0.0.1:8000/api/home',
+          'http://127.0.0.1:8000/api/home_sections',
         ),
       );
 
@@ -275,13 +410,12 @@ class _HomePageState extends State<HomePage> {
 
       final data = jsonDecode(response.body);
 
-      final videos =
-          List<Map<String, dynamic>>.from(
-        data['results'] ?? [],
+      final sections = List<Map<String, dynamic>>.from(
+        data['sections'] ?? [],
       );
 
       if (mounted) {
-        setState(() => _videos = videos);
+        setState(() => _sections = sections);
       }
     } catch (e) {
       if (mounted) {
@@ -291,9 +425,7 @@ class _HomePageState extends State<HomePage> {
       }
     } finally {
       if (mounted) {
-        setState(
-          () => _loading = false,
-        );
+        setState(() => _loading = false);
       }
     }
   }
@@ -303,9 +435,7 @@ class _HomePageState extends State<HomePage> {
     return uri?.queryParameters['v'];
   }
 
-  void _openVideo(
-    Map<String, dynamic> video,
-  ) {
+  void _openVideo(Map<String, dynamic> video) {
     final id = _extractVideoId(
       video['url']?.toString() ?? '',
     );
@@ -315,37 +445,48 @@ class _HomePageState extends State<HomePage> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) =>
-            VideoDetailPage(videoId: id),
+        builder: (_) => VideoDetailPage(videoId: id),
       ),
     );
   }
 
-  Widget _buildCard(
-    Map<String, dynamic> video,
-  ) {
+  int _columnsFor(double width) {
+    if (width >= 1600) return 6;
+    if (width >= 1300) return 5;
+    if (width >= 1000) return 4;
+    if (width >= 750) return 3;
+    if (width >= 500) return 2;
+    return 1;
+  }
+
+  void _openCategory(String name, String url) {
+    final uri = Uri.tryParse(url);
+
+    if (uri == null) return;
+
+    final genre = uri.queryParameters['genre'] ?? '';
+    final sort = uri.queryParameters['sort'] ?? '';
+
+    if (widget.onOpenCategory != null) {
+      widget.onOpenCategory!(name, genre, sort);
+    }
+  }
+
+  Widget _buildCard(Map<String, dynamic> video) {
     final thumbnail =
         video['thumbnail']?.toString() ?? '';
-
-    final title =
-        video['title']?.toString() ?? '';
-
+    final title = video['title']?.toString() ?? '';
     final duration =
         video['duration']?.toString() ?? '';
-
-    final rating =
-        video['rating']?.toString() ?? '';
-
-    final views =
-        video['views']?.toString() ?? '';
+    final rating = video['rating']?.toString() ?? '';
+    final views = video['views']?.toString() ?? '';
 
     return Card(
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () => _openVideo(video),
         child: Column(
-          crossAxisAlignment:
-              CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             AspectRatio(
               aspectRatio: 16 / 9,
@@ -353,75 +494,115 @@ class _HomePageState extends State<HomePage> {
                   ? Image.network(
                       thumbnail,
                       fit: BoxFit.cover,
-                      errorBuilder: (
-                        _,
-                        __,
-                        ___,
-                      ) =>
-                          Container(
+                      errorBuilder: (_, __, ___) => Container(
                         color: Colors.black12,
-                        alignment:
-                            Alignment.center,
-                        child: const Icon(
-                          Icons.broken_image,
-                        ),
+                        alignment: Alignment.center,
+                        child: const Icon(Icons.broken_image),
                       ),
                     )
                   : Container(
                       color: Colors.black12,
                       alignment: Alignment.center,
-                      child: const Icon(
-                        Icons.image_not_supported,
-                      ),
+                      child: const Icon(Icons.image_not_supported),
                     ),
             ),
             Padding(
-              padding:
-                  const EdgeInsets.fromLTRB(
-                12,
-                10,
-                12,
-                4,
-              ),
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
               child: Text(
                 title,
                 maxLines: 2,
-                overflow:
-                    TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                ),
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600),
               ),
             ),
             Padding(
-              padding:
-                  const EdgeInsets.fromLTRB(
-                12,
-                0,
-                12,
-                12,
-              ),
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
               child: Text(
-                [
-                  duration,
-                  rating,
-                  views,
-                ]
-                    .where(
-                      (v) => v.isNotEmpty,
-                    )
+                [duration, rating, views]
+                    .where((v) => v.isNotEmpty)
                     .join(' · '),
                 maxLines: 1,
-                overflow:
-                    TextOverflow.ellipsis,
-                style: Theme.of(context)
-                    .textTheme
-                    .bodySmall,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall,
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildSection(
+    Map<String, dynamic> section,
+    double maxWidth,
+  ) {
+    final name = section['name']?.toString() ?? '';
+    final url = section['url']?.toString() ?? '';
+    final videos = List<Map<String, dynamic>>.from(
+      section['videos'] ?? [],
+    );
+
+    if (videos.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final columns = _columnsFor(maxWidth);
+
+    const horizontalPadding = 48.0;
+    const crossAxisSpacing = 16.0;
+
+    final availableWidth = maxWidth -
+        horizontalPadding -
+        crossAxisSpacing * (columns - 1);
+    final itemWidth = availableWidth / columns;
+    final thumbnailHeight = itemWidth * 9 / 16;
+    final itemHeight = thumbnailHeight + 92;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                name,
+                style: const TextStyle(
+                  fontSize: 26,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              if (url.isNotEmpty)
+                TextButton(
+                  onPressed: () {
+                    _openCategory(name, url);
+                  },
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('查看更多'),
+                      Icon(Icons.chevron_right, size: 18),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),        
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columns,
+            crossAxisSpacing: crossAxisSpacing,
+            mainAxisSpacing: 16,
+            mainAxisExtent: itemHeight,
+          ),
+          itemCount: videos.length,
+          itemBuilder: (_, index) => _buildCard(videos[index]),
+        ),
+      ],
     );
   }
 
@@ -440,18 +621,26 @@ class _HomePageState extends State<HomePage> {
           children: [
             Text(
               _error!,
-              style: const TextStyle(
-                color: Colors.red,
-              ),
+              style: const TextStyle(color: Colors.red),
             ),
             const SizedBox(height: 12),
             FilledButton.icon(
               onPressed: _loadHomeVideos,
-              icon: const Icon(
-                Icons.refresh,
-              ),
+              icon: const Icon(Icons.refresh),
               label: const Text('重新加载'),
             ),
+          ],
+        ),
+      );
+    }
+
+    if (_sections.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _loadHomeVideos,
+        child: ListView(
+          children: const [
+            SizedBox(height: 180),
+            Center(child: Text('暂无内容')),
           ],
         ),
       );
@@ -460,48 +649,13 @@ class _HomePageState extends State<HomePage> {
     return RefreshIndicator(
       onRefresh: _loadHomeVideos,
       child: LayoutBuilder(
-        builder: (
-          context,
-          constraints,
-        ) {
-          int columns;
-
-          if (constraints.maxWidth >= 1600) {
-            columns = 6;
-          } else if (constraints.maxWidth >= 1300) {
-            columns = 5;
-          } else if (constraints.maxWidth >= 1000) {
-            columns = 4;
-          } else if (constraints.maxWidth >= 750) {
-            columns = 3;
-          } else if (constraints.maxWidth >= 500) {
-            columns = 2;
-          } else {
-            columns = 1;
-          }
-          
-          const horizontalPadding = 48.0;
-          const crossAxisSpacing = 16.0;
-
-          final availableWidth = constraints.maxWidth -
-              horizontalPadding -
-              crossAxisSpacing * (columns - 1);
-          final itemWidth = availableWidth / columns;
-          final thumbnailHeight = itemWidth * 9 / 16;
-          final itemHeight = thumbnailHeight + 92;
-
-          return GridView.builder(
-            padding: const EdgeInsets.all(24),
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: columns,
-              crossAxisSpacing: crossAxisSpacing,
-              mainAxisSpacing: 16,
-              mainAxisExtent: itemHeight,
-            ),
-            itemCount: _videos.length,
-            itemBuilder: (_, index) =>
-                _buildCard(
-              _videos[index],
+        builder: (context, constraints) {
+          return ListView.builder(
+            padding: const EdgeInsets.only(bottom: 24),
+            itemCount: _sections.length,
+            itemBuilder: (_, index) => _buildSection(
+              _sections[index],
+              constraints.maxWidth,
             ),
           );
         },
