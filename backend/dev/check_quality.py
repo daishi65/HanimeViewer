@@ -1,5 +1,10 @@
 import json
 
+import os
+import sys
+
+# 让脚本无论从哪个目录运行，都能 import 到 backend 下的 cdp / parser
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cdp.chrome import ChromeCDP
 
 

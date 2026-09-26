@@ -1,28 +1,83 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'playlist_page.dart';
 import 'widgets/windows11_loading.dart';
 import 'controllers/theme_controller.dart';
+import 'controllers/app_cache.dart';
+import 'controllers/auth_controller.dart';
+import 'controllers/account_scope.dart';
+import 'controllers/backend_launcher.dart';
+import 'login_dialog.dart';
+import 'new_release_page.dart';
+import 'startup_gate.dart';
+import 'user_profile_page.dart';
+import 'utils/format.dart';
 import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
-import 'package:video_player_win/video_player_win.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
+import 'controllers/app_config.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await windowManager.ensureInitialized();
 
+  // 允许用环境变量覆盖端口，方便排错或同时跑多个实例
+  AppConfig.applyEnvironment(Platform.environment);
+
   await ThemeController.load();
 
-  runApp(const HanimeViewerApp());
+  // 先读本地缓存的账号信息（立刻能显示头像），再异步向后端确认
+  await AuthController.load();
+
+  // 自己把后端拉起来（后端再去把调试 Chrome 拉起来）。
+  // 如果后端已经在跑（比如开发时手动起的），会直接复用。
+  final (backendOk, backendError) = await BackendLauncher.start();
+
+  // 关窗口时把后端一起收掉，否则端口会一直被占着。
+  // 只收我们自己启动的那个：如果后端是外部起的就不动它。
+  windowManager.addListener(_LifecycleCleaner());
+
+  runApp(
+    HanimeViewerApp(
+      backendStarted: backendOk,
+      backendAlreadyRunning: backendOk && !BackendLauncher.startedByUs,
+      backendError: backendError,
+    ),
+  );
+}
+
+/// 负责在 App 退出时清理我们启动的后端进程。
+class _LifecycleCleaner with WindowListener {
+  @override
+  void onWindowClose() {
+    // 先同步关掉后端，再让窗口正常关闭
+    BackendLauncher.stop().whenComplete(() {
+      windowManager.destroy();
+    });
+  }
 }
 
 class HanimeViewerApp extends StatelessWidget {
-  const HanimeViewerApp({super.key});
+  /// 后端是否已就绪（自己起的或外部已有的）
+  final bool backendStarted;
+
+  /// 后端是否在启动前就已经在跑
+  final bool backendAlreadyRunning;
+
+  /// 启动后端失败时的原因
+  final String backendError;
+
+  const HanimeViewerApp({
+    super.key,
+    this.backendStarted = true,
+    this.backendAlreadyRunning = false,
+    this.backendError = '',
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -47,14 +102,26 @@ class HanimeViewerApp extends StatelessWidget {
             useMaterial3: true,
           ),
           themeMode: themeMode,
-          home: const MainShell(),          
+          home: StartupGate(
+            backendAlreadyRunning: backendAlreadyRunning,
+            initialError: backendError,
+            child: const MainShell(),
+          ),
         );        
       },
     );
   }
 }
 
-enum _MainSection { home, search, history, playlist, downloads, settings }
+enum _MainSection {
+  home,
+  search,
+  history,
+  playlist,
+  newRelease,
+  downloads,
+  settings,
+}
 
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
@@ -68,21 +135,32 @@ class _MainShellState extends State<MainShell> {
 
   Map<String, String>? _searchPreset;
 
-  String get _title {
-    switch (_section) {
-      case _MainSection.home:
-        return '首页';
-      case _MainSection.search:
-        return '搜索';
-      case _MainSection.history:
-        return '观看历史';
-      case _MainSection.playlist:
-        return '播放清单';
-      case _MainSection.downloads:
-        return '下载';
-      case _MainSection.settings:
-        return '设置';
-    }
+  /// 已经创建过的页面。
+  ///
+  /// 以前 _buildPage() 用 switch 只返回当前页面，切走时旧页面会被销毁，
+  /// 切回来重新 initState -> 重新请求接口，所以每次切换都要重新等一遍。
+  /// 现在把页面放进 IndexedStack 保留 State，切回来时内容还在，
+  /// 配合 AppCache 也就不会重复请求了。
+  final Map<_MainSection, Widget> _pages = {};
+
+  /// 创建这些页面时用的是哪个账号。
+  ///
+  /// 观看历史 / 搜索记录 / 播放清单 / 播放进度都是跟着账号走的，
+  /// 所以换账号时必须把已经建好的页面丢掉重建，
+  /// 否则会一直显示上一个账号的数据。
+  String _pagesScope = AccountScope.prefix;
+
+  /// 账号变了就清掉缓存页面（下次 build 会用新账号重建）。
+  void _resetPagesIfAccountChanged() {
+    final current = AccountScope.prefix;
+
+    if (current == _pagesScope) return;
+
+    _pagesScope = current;
+    _pages.clear();
+
+    // 接口结果也按账号隔离：里面可能含播放清单等私有数据
+    AppCache.clear();
   }
 
   void _select(_MainSection section) {
@@ -103,11 +181,29 @@ class _MainShellState extends State<MainShell> {
         'sort': sort,
         'key': DateTime.now().microsecondsSinceEpoch.toString(),
       };
+
+      // 换了筛选条件，搜索页需要重建（key 变了）
+      _pages.remove(_MainSection.search);
     });
   }
 
-  Widget _buildPage() {
-    switch (_section) {
+  Widget _pageFor(_MainSection section) {
+    // 先查已创建的页面，存在就直接复用（IndexedStack 会保留它的 State）
+    final existing = _pages[section];
+
+    if (existing != null) {
+      return existing;
+    }
+
+    final created = _createPage(section);
+
+    _pages[section] = created;
+
+    return created;
+  }
+
+  Widget _createPage(_MainSection section) {
+    switch (section) {
       case _MainSection.home:
         return HomePage(onOpenCategory: _openCategory);
       case _MainSection.search:
@@ -119,11 +215,13 @@ class _MainShellState extends State<MainShell> {
           ),
           initialGenre: _searchPreset?['genre'] ?? '',
           initialSort: _searchPreset?['sort'] ?? '',
-        );        
+        );
       case _MainSection.history:
         return const HistoryPage();
       case _MainSection.playlist:
         return const PlaylistPage();
+      case _MainSection.newRelease:
+        return const NewReleasePage();
       case _MainSection.downloads:
         return const _PlaceholderPage(
           icon: Icons.download,
@@ -133,6 +231,35 @@ class _MainShellState extends State<MainShell> {
       case _MainSection.settings:
         return const SettingsPage();        
     }
+  }
+
+  /// 用 IndexedStack 承载所有「已经打开过」的页面：
+  /// 只有当前页可见，其余页面保持存活但不可见，
+  /// 这样切回来时滚动位置、输入内容、已加载的数据都还在。
+  ///
+  /// 没打开过的页面不会创建，所以不会在启动时把所有接口都请求一遍。
+  Widget _buildPage() {
+    // 换了账号就把旧页面丢掉，用新账号重建
+    _resetPagesIfAccountChanged();
+
+    // 确保当前页面已经创建（第一次进入某个栏目时在这里创建）
+    final current = _pageFor(_section);
+
+    final opened = [
+      for (final section in _MainSection.values)
+        if (_pages.containsKey(section)) section,
+    ];
+
+    if (opened.length <= 1) {
+      return current;
+    }
+
+    return IndexedStack(
+      index: opened.indexOf(_section),
+      children: [
+        for (final section in opened) _pages[section]!,
+      ],
+    );
   }
 
   Widget _buildNavigation({bool drawer = false}) {
@@ -158,13 +285,19 @@ class _MainShellState extends State<MainShell> {
         _MainSection.history,
         Icons.history_outlined,
         Icons.history,
-        '观看历史'
+        '观看记录'
       ),
       (
         _MainSection.playlist,
         Icons.playlist_play_outlined,
         Icons.playlist_play,
         '播放清单'
+      ),
+      (
+        _MainSection.newRelease,
+        Icons.new_releases_outlined,
+        Icons.new_releases,
+        '新番预告'
       ),
       (
         _MainSection.downloads,
@@ -182,57 +315,178 @@ class _MainShellState extends State<MainShell> {
 
     if (drawer) {
       return SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Column(
           children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 8, 20, 20),
-              child: Text(
-                'HanimeViewer',
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(20, 8, 20, 20),
+                    child: Text(
+                      'HanimeViewer',
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  for (final item in items)
+                    ListTile(
+                      leading: Icon(
+                        _section == item.$1
+                            ? item.$3
+                            : item.$2,
+                      ),
+                      title: Text(item.$4),
+                      selected: _section == item.$1,
+                      onTap: () => _select(item.$1),
+                    ),
+                ],
               ),
             ),
-            for (final item in items)
-              ListTile(
-                leading: Icon(
-                  _section == item.$1
-                      ? item.$3
-                      : item.$2,
-                ),
-                title: Text(item.$4),
-                selected: _section == item.$1,
-                onTap: () => _select(item.$1),
-              ),
+            const Divider(height: 1),
+            _AccountTile(
+              onOpenProfile: _openMyProfile,
+              onLogout: _logout,
+            ),
           ],
         ),
       );
     }
 
-    return NavigationRail(
-      selectedIndex:
-          _MainSection.values.indexOf(_section),
-      onDestinationSelected: (index) =>
-          _select(_MainSection.values[index]),
-      labelType: NavigationRailLabelType.all,
-      leading: const Padding(
-        padding: EdgeInsets.only(bottom: 24),
-        child: Icon(
-          Icons.video_library,
-          size: 30,
+    // 侧边栏：NavigationRail 占上方，账号入口固定在底部。
+    // 外面套一个固定宽度的 SizedBox，保证 NavigationRail 拿到明确的宽度约束
+    // （否则在窄窗口下它会算出非法约束导致布局断言失败）。
+    return SizedBox(
+      width: 88,
+      child: Column(
+        children: [
+          Expanded(
+            child: NavigationRail(
+              selectedIndex:
+                  _MainSection.values.indexOf(_section),
+              onDestinationSelected: (index) =>
+                  _select(_MainSection.values[index]),
+              labelType: NavigationRailLabelType.all,
+              leading: const Padding(
+                padding: EdgeInsets.only(bottom: 16),
+                child: Icon(
+                  Icons.video_library,
+                  size: 28,
+                ),
+              ),
+              destinations: [
+                for (final item in items)
+                  NavigationRailDestination(
+                    icon: Icon(item.$2),
+                    selectedIcon: Icon(item.$3),
+                    label: Text(item.$4),
+                  ),
+              ],
+            ),
+          ),
+          // 左下角的账号头像：未登录显示登录入口，登录后点进自己的主页
+          const Divider(height: 1),
+          _AccountTile(
+            onOpenProfile: _openMyProfile,
+            onLogout: _logout,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 退出登录。
+  ///
+  /// 会让浏览器登出，然后把本地数据切回「未登录」作用域 ——
+  /// 这样下一个人登录时不会看到上一个账号的历史和播放清单。
+  Future<void> _logout() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('退出登录'),
+        content: const Text(
+          '退出后会回到未登录状态。\n'
+          '各账号的观看历史、搜索记录、播放进度都是分开保存的，'
+          '重新登录仍会看到自己的数据。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('退出'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    await AuthController.logout();
+
+    if (!mounted) return;
+
+    // 切回未登录作用域，页面按新作用域重建
+    setState(() {});
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('已退出登录')),
+    );
+  }
+
+  /// 打开「我的主页」（点赞过的影片、储存的播放清单都在这里）
+  void _openMyProfile() {
+    final info = AuthController.account.value;
+
+    if (!info.loggedIn || info.userId.isEmpty) {
+      _showLogin();
+
+      return;
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => UserProfilePage(
+          userId: info.userId,
+          initialName: info.username,
+          initialTab: 'home',
         ),
       ),
-      destinations: [
-        for (final item in items)
-          NavigationRailDestination(
-            icon: Icon(item.$2),
-            selectedIcon: Icon(item.$3),
-            label: Text(item.$4),
-          ),
-      ],
     );
+  }
+
+  Future<void> _showLogin() async {
+    final before = AccountScope.prefix;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => const LoginDialog(),
+    );
+
+    if (!mounted) return;
+
+    // 登录对话框内部会更新 AuthController.account。
+    // 这里显式重建一次，保证：
+    // - 侧边栏头像立刻更新
+    // - 已经缓存的页面按新账号重建（见 _resetPagesIfAccountChanged）
+    setState(() {});
+
+    final changed = AccountScope.prefix != before;
+
+    if (ok == true || changed) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            ok == true ? '登录成功，数据已切换到该账号' : '账号已切换',
+          ),
+        ),
+      );
+    }
   }
 
   @override
@@ -240,6 +494,16 @@ class _MainShellState extends State<MainShell> {
     final wide =
         MediaQuery.sizeOf(context).width >= 800;
 
+    // 账号（登录/登出/换号）变化时整壳重建：
+    // 观看历史、搜索记录、播放清单、播放进度都跟着账号走，
+    // 不重建的话会一直显示上一个账号的数据。
+    return ValueListenableBuilder<AccountInfo>(
+      valueListenable: AuthController.account,
+      builder: (context, _, _) => _buildShell(wide),
+    );
+  }
+
+  Widget _buildShell(bool wide) {
     if (wide) {
       return Scaffold(
         body: Row(
@@ -282,6 +546,8 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  static const String _cacheKey = 'home_sections';
+
   List<Map<String, dynamic>> _sections = [];
   bool _loading = true;
   String? _error;
@@ -289,6 +555,17 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+
+    // 先看缓存：有就直接显示，避免启动时白屏等网络
+    final cached = AppCache.get(_cacheKey);
+
+    if (cached is List) {
+      _sections = List<Map<String, dynamic>>.from(cached);
+      _loading = false;
+
+      return;
+    }
+
     _loadHomeVideos();
   }
 
@@ -301,7 +578,7 @@ class _HomePageState extends State<HomePage> {
     try {
       final response = await http.get(
         Uri.parse(
-          'http://127.0.0.1:8000/api/home_sections',
+          '${AppConfig.backendBase}/api/home_sections',
         ),
       );
 
@@ -316,6 +593,10 @@ class _HomePageState extends State<HomePage> {
       final sections = List<Map<String, dynamic>>.from(
         data['sections'] ?? [],
       );
+
+      if (sections.isNotEmpty) {
+        AppCache.set(_cacheKey, sections, ttl: AppCache.homeTtl);
+      }
 
       if (mounted) {
         setState(() => _sections = sections);
@@ -402,7 +683,7 @@ class _HomePageState extends State<HomePage> {
                   ? Image.network(
                       thumbnail,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => Container(
+                      errorBuilder: (_, _, _) => Container(
                         color: Colors.black12,
                         alignment: Alignment.center,
                         child: const Icon(Icons.broken_image),
@@ -605,11 +886,17 @@ class _SearchPageState extends State<SearchPage> {
 
   List<Map<String, dynamic>> _tagGroups = [];
   bool _tagsLoaded = false;
+  bool _tagsLoading = false;
+
+  /// 标签分组的缓存 key（后端把标签随搜索结果一起返回，这里缓存下来复用）
+  static const String _tagCacheKey = 'search_tag_groups';
 
   bool get _isPortraitCategory =>
       _selectedGenre == '裏番' || _selectedGenre == '泡麵番';
 
-  static const String _historyKey = 'search_history';
+  /// 搜索历史跟着账号走（见 account_scope.dart）
+  String get _historyKey => AccountScope.key('search_history');
+
   static const int _maxHistoryCount = 20;
   List<String> _searchHistory = [];
   bool _showHistoryPanel = false;
@@ -693,6 +980,65 @@ class _SearchPageState extends State<SearchPage> {
 
     // 无条件执行搜索：即使没有任何筛选，也加载默认结果
 
+    final params = <String, String>{};
+
+    if (query.isNotEmpty) {
+      params['query'] = query;
+    }
+
+    if (_selectedGenre.isNotEmpty) {
+      params['genre'] = _selectedGenre;
+    }
+
+    if (_selectedSort.isNotEmpty) {
+      params['sort'] = _selectedSort;
+    }
+
+    if (_selectedDate.isNotEmpty) {
+      params['date'] = _selectedDate;
+    }
+
+    if (_selectedDuration.isNotEmpty) {
+      params['duration'] = _selectedDuration;
+    }
+
+    if (_selectedTags.isNotEmpty) {
+      params['tags'] = _selectedTags.join('|');
+    }
+
+    if (_broadMatch && _selectedTags.isNotEmpty) {
+      params['broad'] = 'on';
+    }
+
+    // 后端要求 query/genre/sort 至少有一个
+    if (!params.containsKey('query') &&
+        !params.containsKey('sort') &&
+        !params.containsKey('genre')) {
+      params['query'] = '';
+    }
+
+    // 同一组筛选条件在短时间内重复请求时，直接用上次的结果，
+    // 不用再等一次「CDP -> 解析」的往返
+    final cacheKey = AppCache.buildKey('/api/filter', params);
+
+    final cached = AppCache.get(cacheKey);
+
+    if (cached is Map && cached['results'] is List) {
+      setState(() {
+        _results = List<Map<String, dynamic>>.from(
+          cached['results'],
+        );
+        _loading = false;
+        _error = null;
+      });
+
+      if (query.isNotEmpty) {
+        _saveSearchHistory(query);
+      }
+
+      return;
+    }
+
     setState(() {
       _loading = true;
       _error = null;
@@ -700,45 +1046,8 @@ class _SearchPageState extends State<SearchPage> {
     });
 
     try {
-      final params = <String, String>{};
-
-      if (query.isNotEmpty) {
-        params['query'] = query;
-      }
-
-      if (_selectedGenre.isNotEmpty) {
-        params['genre'] = _selectedGenre;
-      }
-
-      if (_selectedSort.isNotEmpty) {
-        params['sort'] = _selectedSort;
-      }
-
-      if (_selectedDate.isNotEmpty) {
-        params['date'] = _selectedDate;
-      }
-
-      if (_selectedDuration.isNotEmpty) {
-        params['duration'] = _selectedDuration;
-      }
-
-      if (_selectedTags.isNotEmpty) {
-        params['tags'] = _selectedTags.join('|');
-      }
-
-      if (_broadMatch && _selectedTags.isNotEmpty) {
-        params['broad'] = 'on';
-      }
-
-      // 后端要求 query/genre/sort 至少有一个
-      if (!params.containsKey('query') &&
-          !params.containsKey('sort') &&
-          !params.containsKey('genre')) {
-        params['query'] = '';
-      }
-
       final uri = Uri.parse(
-        'http://127.0.0.1:8000/api/filter',
+        '${AppConfig.backendBase}/api/filter',
       ).replace(queryParameters: params);
 
       final response = await http.get(uri);
@@ -751,11 +1060,43 @@ class _SearchPageState extends State<SearchPage> {
 
       final data = jsonDecode(response.body);
 
+      final results = List<Map<String, dynamic>>.from(
+        data['results'] ?? [],
+      );
+
+      // 标签分组是搜索响应的附赠品（后端从同一个页面里解析出来的），
+      // 这里顺手存下来，点「標籤」时就不用再单独请求一次了。
+      final tagGroups = data['tag_groups'];
+
+      if (tagGroups is List && tagGroups.isNotEmpty) {
+        AppCache.set(
+          _tagCacheKey,
+          tagGroups,
+          ttl: AppCache.tagsTtl,
+        );
+
+        if (mounted) {
+          setState(() {
+            _tagGroups = List<Map<String, dynamic>>.from(tagGroups);
+            _tagsLoaded = true;
+          });
+        }
+      }
+
+      if (results.isNotEmpty) {
+        AppCache.set(
+          cacheKey,
+          {
+            'results': results,
+            'total_pages': data['total_pages'],
+          },
+          ttl: AppCache.searchTtl,
+        );
+      }
+
       if (mounted) {
         setState(() {
-          _results = List<Map<String, dynamic>>.from(
-            data['results'] ?? [],
-          );
+          _results = results;
         });
 
         if (query.isNotEmpty) {
@@ -835,9 +1176,21 @@ class _SearchPageState extends State<SearchPage> {
   Future<void> _loadTags() async {
     if (_tagsLoaded) return;
 
+    // 先看缓存（第一次搜索时已经顺手存下来了，正常情况都走这里，瞬间打开）
+    final cached = AppCache.get(_tagCacheKey);
+
+    if (cached is List && cached.isNotEmpty) {
+      setState(() {
+        _tagGroups = List<Map<String, dynamic>>.from(cached);
+        _tagsLoaded = true;
+      });
+
+      return;
+    }
+
     try {
       final response = await http.get(
-        Uri.parse('http://127.0.0.1:8000/api/tags'),
+        Uri.parse('${AppConfig.backendBase}/api/tags'),
       );
 
       if (response.statusCode != 200) {
@@ -851,6 +1204,14 @@ class _SearchPageState extends State<SearchPage> {
       final groups = List<Map<String, dynamic>>.from(
         data['groups'] ?? [],
       );
+
+      if (groups.isNotEmpty) {
+        AppCache.set(
+          _tagCacheKey,
+          groups,
+          ttl: AppCache.tagsTtl,
+        );
+      }
 
       if (!mounted) return;
 
@@ -868,7 +1229,21 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Future<void> _showTagDialog() async {
+    // 正常情况下标签已经在第一次搜索时随结果一起拿到了，
+    // _loadTags() 会立刻返回，弹窗秒开。
+    // 只有「搜索还没回来就先点标签」这种情况才会真的等待。
+    final firstLoad = !_tagsLoaded;
+
+    if (firstLoad) {
+      // 先给个反馈，避免用户以为没点到
+      setState(() => _tagsLoading = true);
+    }
+
     await _loadTags();
+
+    if (mounted) {
+      setState(() => _tagsLoading = false);
+    }
 
     if (!mounted) return;
 
@@ -904,6 +1279,7 @@ class _SearchPageState extends State<SearchPage> {
     super.dispose();
   }
 
+  /// 筛选栏：始终靠左排列，视觉上统一成一组胶囊按钮。
   Widget _buildFilterBar() {
     final hasActiveFilter = _selectedGenre.isNotEmpty ||
         _selectedSort.isNotEmpty ||
@@ -911,206 +1287,194 @@ class _SearchPageState extends State<SearchPage> {
         _selectedDuration.isNotEmpty ||
         _selectedTags.isNotEmpty;
 
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        _buildFilterMenu(
-          label: '影片类型',
-          currentValue: _selectedGenre,
-          options: _genreOptions,
-          onChanged: (v) {
-            setState(() => _selectedGenre = v);
-            _search();
-          },
-        ),
-        _buildFilterMenu(
-          label: '排序',
-          currentValue: _selectedSort,
-          options: _sortOptions,
-          onChanged: (v) {
-            setState(() => _selectedSort = v);
-            _search();
-          },
-        ),        
-        _buildFilterMenu(
-          label: '日期',
-          currentValue: _selectedDate,
-          options: _dateOptions,
-          onChanged: (v) {
-            setState(() => _selectedDate = v);
-            _search();
-          },
-        ),
-        _buildFilterMenu(
-          label: '時長',
-          currentValue: _selectedDuration,
-          options: _durationOptions,
-          onChanged: (v) {
-            setState(() => _selectedDuration = v);
-            _search();
-          },
-        ),        
-        _buildTagButton(),
-        if (hasActiveFilter)
-          TextButton.icon(
-            onPressed: () {
-              setState(() {
-                _selectedGenre = '';
-                _selectedSort = '';
-                _selectedDate = '';
-                _selectedDuration = '';
-                _selectedTags = [];
-                _broadMatch = false;
-              });
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Wrap(
+        alignment: WrapAlignment.start,
+        spacing: 10,
+        runSpacing: 10,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          _buildDropdownFilter(
+            label: '影片类型',
+            currentValue: _selectedGenre,
+            options: _genreOptions,
+            onChanged: (v) {
+              setState(() => _selectedGenre = v);
               _search();
-            },                       
-            icon: const Icon(Icons.close, size: 16),
-            label: const Text('重置'),
-            style: TextButton.styleFrom(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 8),
-              minimumSize: const Size(0, 32),
-              foregroundColor: Colors.grey.shade700,
-              textStyle: const TextStyle(fontSize: 13),
-            ),
+            },
           ),
-      ],
+          _buildDropdownFilter(
+            label: '排序',
+            currentValue: _selectedSort,
+            options: _sortOptions,
+            onChanged: (v) {
+              setState(() => _selectedSort = v);
+              _search();
+            },
+          ),
+          _buildDropdownFilter(
+            label: '日期',
+            currentValue: _selectedDate,
+            options: _dateOptions,
+            onChanged: (v) {
+              setState(() => _selectedDate = v);
+              _search();
+            },
+          ),
+          _buildDropdownFilter(
+            label: '時長',
+            currentValue: _selectedDuration,
+            options: _durationOptions,
+            onChanged: (v) {
+              setState(() => _selectedDuration = v);
+              _search();
+            },
+          ),
+          _buildTagButton(),
+          if (hasActiveFilter) ...[
+            // 和筛选按钮之间加一条细分隔线，把「重置」区分开
+            Container(
+              width: 1,
+              height: 20,
+              margin: const EdgeInsets.symmetric(horizontal: 2),
+              color: Theme.of(context).dividerColor.withValues(alpha: 0.5),
+            ),
+            _buildResetButton(),
+          ],
+        ],
+      ),
     );
   }
 
-  Widget _buildFilterMenu({
+  Widget _buildResetButton() {
+    final theme = Theme.of(context);
+
+    return TextButton.icon(
+      onPressed: () {
+        setState(() {
+          _selectedGenre = '';
+          _selectedSort = '';
+          _selectedDate = '';
+          _selectedDuration = '';
+          _selectedTags = [];
+          _broadMatch = false;
+        });
+        _search();
+      },
+      icon: const Icon(Icons.refresh, size: 15),
+      label: const Text('重置'),
+      style: TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        minimumSize: const Size(0, _FilterChipStyle.height),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        foregroundColor: theme.colorScheme.error,
+        textStyle: const TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(_FilterChipStyle.radius),
+        ),
+      ),
+    );
+  }
+
+  /// 统一下拉筛选按钮：和「標籤」按钮共用同一套外观。
+  Widget _buildDropdownFilter({
     required String label,
     required String currentValue,
     required List<Map<String, String>> options,
     required ValueChanged<String> onChanged,
   }) {
     final active = currentValue.isNotEmpty;
-    final displayText =
-        active ? '$label · $currentValue' : label;
-
-    final theme = Theme.of(context);
 
     return PopupMenuButton<String>(
       tooltip: label,
+      position: PopupMenuPosition.under,
+      offset: const Offset(0, 6),
       onSelected: onChanged,
       itemBuilder: (context) {
-        return options.map((o) {
-          final isCurrent = o['value'] == currentValue;
-
-          return PopupMenuItem<String>(
-            value: o['value'],
-            height: 40,
-            child: Row(
-              children: [
-                if (isCurrent)
-                  const Icon(
-                    Icons.check,
-                    size: 16,
-                    color: Colors.green,
-                  )
-                else
-                  const SizedBox(width: 16),
-                const SizedBox(width: 8),
-                Text(o['label']!),
-              ],
-            ),
-          );
-        }).toList();
+        return _buildMenuItems(
+          options: options,
+          currentValue: currentValue,
+        );
       },
-      child: Container(
-        height: 32,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(
-          color: active
-              ? theme.colorScheme.primary.withOpacity(0.1)
-              : Colors.transparent,
-          border: Border.all(
-            color: active
-                ? theme.colorScheme.primary
-                : Colors.grey.shade400,
-          ),
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              displayText,
-              style: TextStyle(
-                fontSize: 13,
-                color: active
-                    ? theme.colorScheme.primary
-                    : null,
-                fontWeight: active
-                    ? FontWeight.w600
-                    : FontWeight.normal,
-              ),
-            ),
-            const SizedBox(width: 4),
-            Icon(
-              Icons.arrow_drop_down,
-              size: 18,
-              color: active
-                  ? theme.colorScheme.primary
-                  : Colors.grey.shade700,
-            ),
-          ],
-        ),
+      child: _FilterChip(
+        labelPrefix: label,
+        text: active ? currentValue : '',
+        active: active,
+        trailing: Icons.keyboard_arrow_down_rounded,
       ),
     );
   }
 
+  /// 下拉菜单项：统一的圆角、选中高亮和图标。
+  List<PopupMenuEntry<String>> _buildMenuItems({
+    required List<Map<String, String>> options,
+    required String currentValue,
+  }) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    return options.map((o) {
+      final value = o['value']!;
+      final isCurrent = value == currentValue;
+
+      return PopupMenuItem<String>(
+        value: value,
+        height: 40,
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: Row(
+            children: [
+              Icon(
+                isCurrent
+                    ? Icons.check_rounded
+                    : Icons.circle_outlined,
+                size: 16,
+                color: isCurrent
+                    ? theme.colorScheme.primary
+                    : (isDark
+                        ? Colors.white24
+                        : Colors.black26),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  o['label']!,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: isCurrent
+                        ? FontWeight.w600
+                        : FontWeight.normal,
+                    color: isCurrent
+                        ? theme.colorScheme.primary
+                        : theme.colorScheme.onSurface,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }).toList();
+  }
+
   Widget _buildTagButton() {
     final active = _selectedTags.isNotEmpty;
-    final displayText =
-        active ? '標籤 · ${_selectedTags.length}' : '標籤';
-
-    final theme = Theme.of(context);
 
     return InkWell(
-      onTap: _showTagDialog,
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        height: 32,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(
-          color: active
-              ? theme.colorScheme.primary.withOpacity(0.1)
-              : Colors.transparent,
-          border: Border.all(
-            color: active
-                ? theme.colorScheme.primary
-                : Colors.grey.shade400,
-          ),
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              displayText,
-              style: TextStyle(
-                fontSize: 13,
-                color: active
-                    ? theme.colorScheme.primary
-                    : null,
-                fontWeight: active
-                    ? FontWeight.w600
-                    : FontWeight.normal,
-              ),
-            ),
-            const SizedBox(width: 4),
-            Icon(
-              Icons.arrow_drop_down,
-              size: 18,
-              color: active
-                  ? theme.colorScheme.primary
-                  : Colors.grey.shade700,
-            ),
-          ],
-        ),
+      onTap: _tagsLoading ? null : _showTagDialog,
+      borderRadius: BorderRadius.circular(_FilterChipStyle.radius),
+      child: _FilterChip(
+        labelPrefix: '標籤',
+        text: active ? '已选 ${_selectedTags.length} 个' : '',
+        active: active,
+        trailing: Icons.keyboard_arrow_down_rounded,
+        loading: _tagsLoading,
       ),
     );
   }
@@ -1173,7 +1537,7 @@ class _SearchPageState extends State<SearchPage> {
                   ? Image.network(
                       thumbnail,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => Container(
+                      errorBuilder: (_, _, _) => Container(
                         color: Colors.black12,
                         alignment: Alignment.center,
                         child: const Icon(Icons.broken_image),
@@ -1293,17 +1657,15 @@ class _SearchPageState extends State<SearchPage> {
           builder: (context, constraints) {
             final availableWidth = constraints.maxWidth;
 
-            // 👇 想让搜索框行更靠右 / 更靠左，改这个数字
-            // 0.0 = 居中，0.2 = 稍靠右，0.5 = 很靠右，1.0 = 靠最右
-            // -0.2 = 稍靠左，-1.0 = 靠最左
-            final alignmentX = 0.3;
+            // 搜索框宽度：窗口越宽越长，但不会无限拉长
+            final searchBoxWidth =
+                (availableWidth * 0.40).clamp(260.0, 520.0);
 
-            // 👇 搜索框行整体宽度（改这里可以调宽度）
-            final contentWidth = availableWidth.clamp(0.0, 1000.0);
-
-            // 👇 自动计算左边缘（历史面板对齐用，不用改）
-            final contentLeft =
-                (availableWidth - contentWidth) / 2 * (1 + alignmentX);
+            // 搜索框永远居中，所以它的左边缘就是这个位置。
+            // 历史浮层也按这个位置对齐。
+            final searchBoxLeft =
+                ((availableWidth - searchBoxWidth) / 2)
+                    .clamp(0.0, availableWidth);
 
             return Stack(
               clipBehavior: Clip.none,
@@ -1311,80 +1673,84 @@ class _SearchPageState extends State<SearchPage> {
                 // ---- 主内容 ----
                 Column(
                   children: [
-                    SizedBox(
-                      height: 56,
-                      child: Align(
-                        alignment: Alignment(alignmentX, 0),
-                        child: SizedBox(
-                          width: contentWidth,
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            children: [
-                              SizedBox(
-                                width: 320,
-                                child: TapRegion(
-                                  groupId: 'search_history',
-                                  child: TextField(
-                                    controller: _controller,
-                                    focusNode: _searchFocusNode,
-                                    decoration: InputDecoration(
-                                      labelText: '主人点击我就能色色了哦',
-                                      hintText: 'Hentai杂鱼主人又在看羞羞的东西',
-                                      border: const OutlineInputBorder(),
-                                      suffixIconConstraints:
-                                          const BoxConstraints(
-                                        minWidth: 0,
-                                        minHeight: 0,
+                    // 搜索框单独占一行并居中：
+                    // 这样无论窗口多宽多窄，左右留白都是相等的。
+                    // （之前搜索框和筛选栏挤在同一行，宽度一变就偏了）
+                    Center(
+                      child: SizedBox(
+                        height: 56,
+                        width: searchBoxWidth,
+                        child: TapRegion(
+                          groupId: 'search_history',
+                          child: TextField(
+                            controller: _controller,
+                            focusNode: _searchFocusNode,
+                            textAlignVertical:
+                                TextAlignVertical.center,
+                            decoration: InputDecoration(
+                              labelText: '主人点击我就能色色了哦',
+                              hintText: 'Hentai杂鱼主人又在看羞羞的东西',
+                              border: const OutlineInputBorder(),
+                              // 给右侧的搜索/清空按钮留出位置，
+                              // 否则输入的文字会被按钮压住
+                              contentPadding: const EdgeInsets.only(
+                                left: 12,
+                                right: 88,
+                                top: 16,
+                                bottom: 16,
+                              ),
+                              suffixIconConstraints:
+                                  const BoxConstraints(
+                                minWidth: 0,
+                                minHeight: 0,
+                              ),
+                              suffixIcon: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (_controller.text.isNotEmpty)
+                                    IconButton(
+                                      icon: const Icon(
+                                        Icons.clear,
+                                        size: 20,
                                       ),
-                                      suffixIcon: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          if (_controller.text.isNotEmpty)
-                                            IconButton(
-                                              icon: const Icon(
-                                                Icons.clear,
-                                                size: 20,
-                                              ),
-                                              tooltip: '清空',
-                                              onPressed: () {
-                                                setState(() {
-                                                  _controller.clear();
-                                                });
-                                              },
-                                            ),
-                                          IconButton(
-                                            icon: const Icon(
-                                              Icons.search,
-                                              size: 20,
-                                            ),
-                                            tooltip: '搜索',
-                                            onPressed:
-                                                _loading ? null : _search,
-                                          ),
-                                        ],
-                                      ),
+                                      tooltip: '清空',
+                                      onPressed: () {
+                                        setState(() {
+                                          _controller.clear();
+                                        });
+                                      },
                                     ),
-                                    onChanged: (_) {
-                                      setState(() {});
-                                    },
-                                    onTap: () {
-                                      setState(
-                                        () => _showHistoryPanel = true,
-                                      );
-                                    },
-                                    onSubmitted: (_) => _search(),
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.search,
+                                      size: 20,
+                                    ),
+                                    tooltip: '搜索',
+                                    onPressed:
+                                        _loading ? null : _search,
                                   ),
-                                ),
+                                ],
                               ),
-                              const SizedBox(width: 16),
-                              Expanded(
-                                child: _buildFilterBar(),
-                              ),
-                            ],
+                            ),
+                            onChanged: (_) {
+                              setState(() {});
+                            },
+                            onTap: () {
+                              setState(
+                                () => _showHistoryPanel = true,
+                              );
+                            },
+                            onSubmitted: (_) => _search(),
                           ),
                         ),
                       ),
                     ),
+
+                    const SizedBox(height: 16),
+
+                    // 筛选栏占满整行并靠左排列：
+                    // 不再跟着搜索框一起居中，这样窗口怎么变都是贴左边对齐的。
+                    _buildFilterBar(),
 
                     const SizedBox(height: 20),
 
@@ -1450,8 +1816,8 @@ class _SearchPageState extends State<SearchPage> {
                 if (_showHistoryPanel && _searchHistory.isNotEmpty)
                   Positioned(
                     top: 64,
-                    left: contentLeft,
-                    width: 320,
+                    left: searchBoxLeft,
+                    width: searchBoxWidth,
                     child: TapRegion(
                       groupId: 'search_history',
                       onTapOutside: (_) {
@@ -1641,53 +2007,136 @@ class _HistoryPageState
   List<Map<String, dynamic>> _history = [];
   bool _loading = true;
 
+  /// 数据来自哪里。
+  ///
+  /// - `online`：登录后直接读官网的「觀看紀錄」，和「个人主页 → 观看记录」
+  ///   是同一份数据（同一个接口）。
+  /// - `local`：未登录时用本地记录兜底
+  ///   （本地只记自己看过的，没有账号也就没有官网记录）。
+  String _source = 'local';
+
+  int _page = 1;
+  int _totalPages = 1;
+
+  bool get _isOnline => _source == 'online';
+
   @override
   void initState() {
     super.initState();
+
+    // 账号切换后要重新取（这个页面会被重建，但保险起见仍然监听）
+    AuthController.account.addListener(_onAccountChanged);
+
     _loadHistory();
   }
 
-  Future<void> _loadHistory() async {
+  @override
+  void dispose() {
+    AuthController.account.removeListener(_onAccountChanged);
+    super.dispose();
+  }
+
+  void _onAccountChanged() {
+    if (mounted) _loadHistory();
+  }
+
+  Future<void> _loadHistory({int page = 1}) async {
+    final info = AuthController.account.value;
+
+    if (info.loggedIn && info.userId.isNotEmpty) {
+      await _loadOnline(info.userId, page: page);
+    } else {
+      await _loadLocal();
+    }
+  }
+
+  /// 读官网的观看记录（和个人主页「观看记录」同一个接口、同一份数据）。
+  Future<void> _loadOnline(String userId, {int page = 1}) async {
+    final target = page < 1 ? 1 : page;
+
+    setState(() {
+      _loading = true;
+    });
+
     try {
-      final prefs =
-          await SharedPreferences
-              .getInstance();
+      final uri = Uri.parse('${AppConfig.backendBase}/api/user/$userId')
+          .replace(
+        queryParameters: {
+          'tab': 'histories',
+          'page': '$target',
+        },
+      );
 
-      final raw =
-          prefs.getStringList(
-                'watch_history',
-              ) ??
-              [];
+      final response = await http.get(uri).timeout(
+            const Duration(seconds: 90),
+          );
 
-      final result =
-          <Map<String, dynamic>>[];
+      if (response.statusCode != 200) {
+        throw Exception('服务器返回错误: ${response.statusCode}');
+      }
+
+      final data = jsonDecode(response.body);
+
+      if (data is! Map) {
+        throw Exception('返回数据格式不正确');
+      }
+
+      final videos = List<Map<String, dynamic>>.from(
+        data['videos'] ?? [],
+      );
+
+      final totalPages =
+          int.tryParse('${data['total_pages']}') ?? 1;
+
+      if (!mounted) return;
+
+      setState(() {
+        _history = videos;
+        _source = 'online';
+        _page = target;
+        _totalPages = totalPages < 1 ? 1 : totalPages;
+        _loading = false;
+      });
+    } catch (_) {
+      // 网络失败时退回本地，至少还能看到自己看过的
+      await _loadLocal();
+    }
+  }
+
+  /// 未登录时的本地记录。
+  Future<void> _loadLocal() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      final raw = prefs.getStringList(
+            AccountScope.key('watch_history'),
+          ) ??
+          [];
+
+      final result = <Map<String, dynamic>>[];
 
       for (final item in raw) {
         try {
-          final decoded =
-              jsonDecode(item);
+          final decoded = jsonDecode(item);
 
           if (decoded is Map) {
-            result.add(
-              Map<String, dynamic>.from(
-                decoded,
-              ),
-            );
+            result.add(Map<String, dynamic>.from(decoded));
           }
         } catch (_) {}
       }
 
-      if (mounted) {
-        setState(() {
-          _history = result;
-          _loading = false;
-        });
-      }
+      if (!mounted) return;
+
+      setState(() {
+        _history = result;
+        _source = 'local';
+        _page = 1;
+        _totalPages = 1;
+        _loading = false;
+      });
     } catch (_) {
       if (mounted) {
-        setState(
-          () => _loading = false,
-        );
+        setState(() => _loading = false);
       }
     }
   }
@@ -1722,39 +2171,40 @@ class _HistoryPageState
   void _open(
     Map<String, dynamic> item,
   ) {
-    final id =
-        item['video_id']?.toString();
+    // 本地记录存的是 video_id；官网记录给的是 url，这里两种都支持
+    var id = item['video_id']?.toString() ?? '';
 
-    if (id == null || id.isEmpty) {
-      return;
+    if (id.isEmpty) {
+      final url = item['url']?.toString() ?? '';
+
+      if (url.isNotEmpty) {
+        id = Uri.tryParse(url)?.queryParameters['v'] ?? '';
+      }
     }
+
+    if (id.isEmpty) return;
 
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) =>
-            VideoDetailPage(
-          videoId: id,
-        ),
+        builder: (_) => VideoDetailPage(videoId: id),
       ),
-    ).then(
-      (_) => _loadHistory(),
-    );
+    ).then((_) => _loadHistory());
   }
 
   Future<void> _clearHistory() async {
-    final prefs =
-        await SharedPreferences
-            .getInstance();
+    // 官网的观看记录只能到官网上清，本地没有权限改，
+    // 所以登录状态下不发这个按钮（见 build）。
+    if (_isOnline) return;
+
+    final prefs = await SharedPreferences.getInstance();
 
     await prefs.remove(
-      'watch_history',
+      AccountScope.key('watch_history'),
     );
 
     if (mounted) {
-      setState(
-        () => _history = [],
-      );
+      setState(() => _history = []);
     }
   }
 
@@ -1770,11 +2220,11 @@ class _HistoryPageState
       return RefreshIndicator(
         onRefresh: _loadHistory,
         child: ListView(
-          children: const [
-            SizedBox(height: 180),
+          children: [
+            const SizedBox(height: 180),
             Center(
               child: Text(
-                '暂无观看历史',
+                _isOnline ? '这个账号还没有观看记录' : '暂无观看记录',
               ),
             ),
           ],
@@ -1784,26 +2234,29 @@ class _HistoryPageState
 
     return Column(
       children: [
-        Align(
-          alignment:
-              Alignment.centerRight,
-          child: Padding(
-            padding:
-                const EdgeInsets.fromLTRB(
-              24,
-              12,
-              24,
-              0,
-            ),
-            child: TextButton.icon(
-              onPressed:
-                  _clearHistory,
-              icon: const Icon(
-                Icons.delete_outline,
+        // 「清空」只对本地记录有意义；官网记录要在官网上清
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+          child: Row(
+            children: [
+              Text(
+                _isOnline ? '观看记录（与个人主页一致）' : '观看记录（本地）',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  color: Theme.of(context)
+                      .colorScheme
+                      .onSurface
+                      .withValues(alpha: 0.6),
+                ),
               ),
-              label:
-                  const Text('清空历史'),
-            ),
+              const Spacer(),
+              if (!_isOnline)
+                TextButton.icon(
+                  onPressed: _clearHistory,
+                  icon: const Icon(Icons.delete_outline),
+                  label: const Text('清空历史'),
+                ),
+            ],
           ),
         ),
         Expanded(
@@ -1835,81 +2288,136 @@ class _HistoryPageState
                   item['last_watched']
                       ?.toString();
 
+              // 官网记录带的是时长/播放量，本地记录带的是品牌/观看时间
+              final duration =
+                  item['duration']?.toString() ?? '';
+
+              final views =
+                  item['views']?.toString() ?? '';
+
+              // 用 Row 手写而不是 ListTile：
+              // ListTile 会对 leading 施加自己的尺寸约束，
+              // 我们想要的 16:9 缩略图有可能被压/被裁。
+              // 手写 Row 能保证缩略图就是固定 160x90（16:9）。
+              final meta = [
+                if (brand.isNotEmpty) '品牌：$brand',
+                if (lastWatched != null)
+                  '观看时间：${_formatTime(lastWatched)}',
+                if (_isOnline) ...[
+                  if (duration.isNotEmpty) duration,
+                  if (views.isNotEmpty) views,
+                ],
+              ];
+
               return Card(
-                margin:
-                    const EdgeInsets.only(
-                  bottom: 12,
-                ),
-                child: ListTile(
-                  contentPadding:
-                      const EdgeInsets.all(
-                    10,
-                  ),
-                  leading:
-                      SizedBox(
-                    width: 160,
-                    height: 90,
-                    child: thumbnail
-                            .isNotEmpty
-                        ? Image.network(
-                            thumbnail,
-                            fit: BoxFit.cover,
-                            errorBuilder:
-                                (
-                              _,
-                              __,
-                              ___,
-                            ) =>
-                                    const Icon(
-                              Icons
-                                  .broken_image,
-                            ),
-                          )
-                        : const Icon(
-                            Icons
-                                .play_circle_outline,
-                          ),
-                  ),
-                  title: Text(
-                    title,
-                    maxLines: 2,
-                    overflow:
-                        TextOverflow.ellipsis,
-                  ),
-                  subtitle:
-                      Padding(
-                    padding:
-                        const EdgeInsets.only(
-                      top: 8,
-                    ),
-                    child: Column(
-                      crossAxisAlignment:
-                          CrossAxisAlignment
-                              .start,
+                margin: const EdgeInsets.only(bottom: 12),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: () => _open(item),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        if (brand.isNotEmpty)
-                          Text(
-                            '品牌：$brand',
+                        // 缩略图固定 16:9，和首页/个人中心保持一致
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: SizedBox(
+                            width: 160,
+                            height: 90,
+                            child: thumbnail.isNotEmpty
+                                ? Image.network(
+                                    thumbnail,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, _, _) => Container(
+                                      color: Colors.black12,
+                                      alignment: Alignment.center,
+                                      child: const Icon(
+                                        Icons.broken_image,
+                                      ),
+                                    ),
+                                  )
+                                : Container(
+                                    color: Colors.black12,
+                                    alignment: Alignment.center,
+                                    child: const Icon(
+                                      Icons.play_circle_outline,
+                                    ),
+                                  ),
                           ),
-                        if (lastWatched !=
-                            null)
-                          Text(
-                            '观看时间：${_formatTime(lastWatched)}',
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              if (meta.isNotEmpty) ...[
+                                const SizedBox(height: 6),
+                                Text(
+                                  meta.join('\n'),
+                                  maxLines: 3,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    height: 1.5,
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurface
+                                        .withValues(alpha: 0.62),
+                                  ),
+                                ),
+                              ],
+                            ],
                           ),
+                        ),
+                        const Icon(Icons.chevron_right),
                       ],
                     ),
                   ),
-                  trailing:
-                      const Icon(
-                    Icons.chevron_right,
-                  ),
-                  onTap: () =>
-                      _open(item),
                 ),
               );
             },
           ),
         ),
+
+        // 官网观看记录每页 60 条，页数多，必须能翻页
+        if (_isOnline && _totalPages > 1)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  tooltip: '上一页',
+                  onPressed: (_page > 1 && !_loading)
+                      ? () => _loadHistory(page: _page - 1)
+                      : null,
+                  icon: const Icon(Icons.chevron_left),
+                ),
+                const SizedBox(width: 8),
+                Text('第 $_page / $_totalPages 页'),
+                const SizedBox(width: 8),
+                IconButton(
+                  tooltip: '下一页',
+                  onPressed: (_page < _totalPages && !_loading)
+                      ? () => _loadHistory(page: _page + 1)
+                      : null,
+                  icon: const Icon(Icons.chevron_right),
+                ),
+              ],
+            ),
+          ),
       ],
     );
   }
@@ -2008,7 +2516,7 @@ class _ThemeOptionTile extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 8),
       child: Material(
         color: selected
-            ? theme.colorScheme.primary.withOpacity(0.1)
+            ? theme.colorScheme.primary.withValues(alpha: 0.1)
             : theme.colorScheme.surface,
         borderRadius: BorderRadius.circular(12),
         clipBehavior: Clip.antiAlias,
@@ -2138,6 +2646,12 @@ class _VideoDetailPageState
   bool _loading = true;
   String? _error;
 
+  /// 点赞 / 储存请求进行中
+  bool _acting = false;
+
+  /// 本影片详情在 AppCache 里的 key
+  String get _detailCacheKey => 'video_detail_${widget.videoId}';
+
   VideoPlayerController?
       _videoPlayerController;
 
@@ -2145,7 +2659,8 @@ class _VideoDetailPageState
 
   bool _showVideoCover = true;
 
-  bool _autoPlayNext = true;
+  /// 播完当前影片是否自动播下一集（目前固定开启，暂无设置项）
+  final bool _autoPlayNext = true;
 
   final ScrollController _playlistScrollController =
       ScrollController();
@@ -2174,7 +2689,7 @@ class _VideoDetailPageState
   Future<void> _loadVideo() async {
     try {
       final uri = Uri.parse(
-        'http://127.0.0.1:8000/api/video/${widget.videoId}',
+        '${AppConfig.backendBase}/api/video/${widget.videoId}',
       );
 
       final response =
@@ -2262,7 +2777,7 @@ class _VideoDetailPageState
 
     final history =
         prefs.getStringList(
-              'watch_history',
+              AccountScope.key('watch_history'),
             ) ??
             [];
 
@@ -2320,7 +2835,7 @@ class _VideoDetailPageState
     }
 
     await prefs.setStringList(
-      'watch_history',
+      AccountScope.key('watch_history'),
       history,
     );
   }
@@ -2440,8 +2955,12 @@ class _VideoDetailPageState
         await SharedPreferences
             .getInstance();
 
-    final key =
-        'video_position_${widget.videoId}';
+    // 播放进度也要跟着账号走：
+    // 同一个影片，账号 A 看到 12:30，账号 B 不该被带过去
+    final key = AccountScope.scopedKey(
+      'video_position',
+      widget.videoId,
+    );
 
     final savedSeconds =
         prefs.getInt(key);
@@ -2581,8 +3100,12 @@ class _VideoDetailPageState
         await SharedPreferences
             .getInstance();
 
-    final key =
-        'video_position_${widget.videoId}';
+    // 播放进度也要跟着账号走：
+    // 同一个影片，账号 A 看到 12:30，账号 B 不该被带过去
+    final key = AccountScope.scopedKey(
+      'video_position',
+      widget.videoId,
+    );
 
     await prefs.setInt(
       key,
@@ -2648,15 +3171,7 @@ class _VideoDetailPageState
   }
 
   String _formatDuration(Duration duration) {
-    final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
-    final hours = duration.inHours;
-
-    if (hours > 0) {
-      return '$hours:${minutes}:${seconds}';
-    }
-
-    return '$minutes:$seconds';
+    return formatPlaybackDuration(duration);
   }
 
   void _showPlayerControls() {
@@ -2779,7 +3294,7 @@ class _VideoDetailPageState
                         Image.network(
                           thumbnail,
                           fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => Container(
+                          errorBuilder: (_, _, _) => Container(
                             color: Colors.black,
                           ),
                         )
@@ -2889,7 +3404,7 @@ class _VideoDetailPageState
                                 vertical: 3,
                               ),
                               decoration: BoxDecoration(
-                                color: Colors.black.withOpacity(0.85),
+                                color: Colors.black.withValues(alpha: 0.85),
                                 borderRadius: BorderRadius.circular(3),
                               ),
                               child: Text(
@@ -2982,7 +3497,7 @@ class _VideoDetailPageState
                                       inactiveTrackColor: Colors.white24,
                                       thumbColor: Colors.red,
                                       overlayColor:
-                                          Colors.red.withOpacity(0.2),
+                                          Colors.red.withValues(alpha: 0.2),
                                       thumbShape:
                                           const RoundSliderThumbShape(
                                         enabledThumbRadius: 6.0,
@@ -3074,8 +3589,13 @@ class _VideoDetailPageState
 
     await windowManager.setFullScreen(true);
 
-    await Navigator.push(
-      context,
+    // setFullScreen 是异步的，这期间页面可能已经被关掉，
+    // 所以用 context 之前必须确认还挂着。
+    if (!mounted) return;
+
+    final navigator = Navigator.of(context);
+
+    await navigator.push(
       MaterialPageRoute(
         builder: (_) => _FullscreenPlayerPage(
           controller: controller,
@@ -3289,8 +3809,8 @@ class _VideoDetailPageState
                         fit: BoxFit.cover,
                         errorBuilder: (
                           _,
-                          __,
-                          ___,
+                          _,
+                          _,
                         ) =>
                             Container(
                           color:
@@ -3441,8 +3961,13 @@ class _VideoDetailPageState
                 ?.toString() ??
             '';
 
-    final fileSize =
-        video['file_size']
+    final uploader =
+        video['uploader']
+                ?.toString() ??
+            '';
+
+    final views =
+        video['views']
                 ?.toString() ??
             '';
 
@@ -3460,12 +3985,16 @@ class _VideoDetailPageState
           value: brand,
         ),
         _InfoRow(
-          label: '发行日期',
-          value: releaseDate,
+          label: '上传者',
+          value: uploader,
         ),
         _InfoRow(
-          label: '文件大小',
-          value: fileSize,
+          label: '观看次数',
+          value: views,
+        ),
+        _InfoRow(
+          label: '发行日期',
+          value: releaseDate,
         ),
         const SizedBox(
           height: 16,
@@ -3603,15 +4132,347 @@ class _VideoDetailPageState
                   ],
                 ),
               const SizedBox(
+                height: 16,
+              ),
+
+              // 播放器下方的操作条：发行商头像 + 点赞/储存/下载
+              // 对应官网播放器下面那一排按钮
+              _buildActionBar(),
+
+              const SizedBox(
                 height: 24,
               ),
               _buildInfoSection(),
+
+              const SizedBox(
+                height: 32,
+              ),
+
+              // 相关影片（和官网一样放在详情下方）
+              _buildRelatedSection(),
             ],
           ),
         );
       },
     );
   }
+
+  /// 播放器下方操作条：左边是发行商头像（可点击进入主页），
+  /// 右边是点赞比例、储存、下载。
+  Widget _buildActionBar() {
+    final video = _video!;
+
+    final artistName = video['brand']?.toString() ?? '';
+    final artistUrl = video['artist_url']?.toString() ?? '';
+    final artistAvatar = video['artist_avatar']?.toString() ?? '';
+
+    final likeRatio = video['like_ratio']?.toString() ?? '';
+    final likeCount = video['like_count']?.toString() ?? '';
+
+    final downloadUrl = video['download_url']?.toString() ?? '';
+
+    final hasArtist = artistName.isNotEmpty;
+    final hasLike = likeCount.isNotEmpty || likeRatio.isNotEmpty;
+
+    if (!hasArtist && !hasLike && downloadUrl.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final theme = Theme.of(context);
+
+    return Wrap(
+      spacing: 12,
+      runSpacing: 12,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        if (hasArtist) _buildArtistChip(artistName, artistAvatar, artistUrl),
+
+        // 点赞 / 储存：登录后可以真正生效
+        if (hasLike)
+          _ActionChip(
+            icon: Icons.thumb_up_outlined,
+            label: '点赞',
+            trailing: likeRatio.isNotEmpty
+                ? '$likeRatio${likeCount.isNotEmpty ? ' · $likeCount' : ''}'
+                : likeCount,
+            color: theme.colorScheme.primary,
+            busy: _acting,
+            onTap: _acting ? null : () => _doVideoAction('like'),
+          ),
+
+        _ActionChip(
+          icon: Icons.playlist_add,
+          label: '储存',
+          tooltip: '把影片存进你的播放清单',
+          busy: _acting,
+          onTap: _acting ? null : () => _doVideoAction('save'),
+        ),
+
+        if (downloadUrl.isNotEmpty)
+          _ActionChip(
+            icon: Icons.download_outlined,
+            label: '下载',
+            tooltip: downloadUrl,
+          ),
+      ],
+    );
+  }
+
+  /// 执行点赞 / 储存。
+  ///
+  /// 没登录就先引导登录——不假装成功。
+  Future<void> _doVideoAction(String action) async {
+    if (!AuthController.isLoggedIn) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (_) => const LoginDialog(),
+      );
+
+      if (ok != true || !mounted) return;
+    }
+
+    setState(() => _acting = true);
+
+    try {
+      final response = await http
+          .post(
+            Uri.parse(
+              '${AppConfig.backendBase}/api/video/${widget.videoId}/action',
+            ),
+            headers: const {
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({'action': action}),
+          )
+          .timeout(const Duration(seconds: 120));
+
+      final data = jsonDecode(response.body);
+
+      if (response.statusCode != 200) {
+        final detail =
+            data is Map ? data['detail']?.toString() : null;
+
+        throw Exception(detail ?? '操作失败（${response.statusCode}）');
+      }
+
+      if (!mounted) return;
+
+      final message =
+          (data is Map ? data['message']?.toString() : null) ?? '完成';
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+
+      // 播放清单会变，清掉详情与用户主页缓存后重新加载
+      AppCache.removeWherePrefix('/api/user/');
+      AppCache.remove(_detailCacheKey);
+
+      await _loadVideo();
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _acting = false);
+      }
+    }
+  }
+
+  /// 发行商/品牌：头像 + 名称，点击在 APP 内打开发行商主页。
+  Widget _buildArtistChip(
+    String name,
+    String avatar,
+    String url,
+  ) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    final artistId = _video!['artist_id']?.toString() ?? '';
+
+    return Tooltip(
+      message: artistId.isEmpty ? name : '查看 $name 的主页',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(24),
+        onTap: artistId.isEmpty
+            ? null
+            : () {
+                // 在 APP 内打开，不再跳到外部浏览器
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => UserProfilePage(
+                      userId: artistId,
+                      initialName: name,
+                    ),
+                  ),
+                );
+              },
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(4, 4, 12, 4),
+          decoration: BoxDecoration(
+            color: isDark
+                ? Colors.white.withValues(alpha: 0.06)
+                : const Color(0xFFF3F4F6),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+              color: isDark ? Colors.white12 : const Color(0xFFE2E4E8),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ClipOval(
+                child: SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: avatar.isEmpty
+                      ? Container(
+                          color: theme.colorScheme.primary
+                              .withValues(alpha: 0.15),
+                          child: Icon(
+                            Icons.storefront_outlined,
+                            size: 18,
+                            color: theme.colorScheme.primary,
+                          ),
+                        )
+                      : Image.network(
+                          avatar,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, _, _) => Container(
+                            color: theme.colorScheme.primary
+                                .withValues(alpha: 0.15),
+                            child: Icon(
+                              Icons.storefront_outlined,
+                              size: 18,
+                              color: theme.colorScheme.primary,
+                            ),
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    name,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  Text(
+                    '发行商',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: theme.colorScheme.onSurface
+                          .withValues(alpha: 0.55),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 相关影片：官网从同一个页面里就能解析出来，不需要额外请求。
+  Widget _buildRelatedSection() {
+    final related = List<Map<String, dynamic>>.from(
+      _video!['related'] ?? [],
+    );
+
+    if (related.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final theme = Theme.of(context);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(
+              Icons.video_library_outlined,
+              size: 20,
+              color: theme.colorScheme.primary,
+            ),
+            const SizedBox(width: 8),
+            const Text(
+              '相关影片',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              '${related.length}',
+              style: TextStyle(
+                fontSize: 13,
+                color: theme.colorScheme.onSurface
+                    .withValues(alpha: 0.5),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            // 卡片宽度固定，列数随可用宽度变化
+            const cardWidth = 200.0;
+            const spacing = 12.0;
+
+            final columns = ((constraints.maxWidth + spacing) /
+                    (cardWidth + spacing))
+                .floor()
+                .clamp(1, 8);
+
+            return GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate:
+                  SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                crossAxisSpacing: spacing,
+                mainAxisSpacing: spacing,
+                childAspectRatio: 0.72,
+              ),
+              itemCount: related.length,
+              itemBuilder: (context, index) {
+                return _RelatedVideoCard(
+                  video: related[index],
+                  onTap: () {
+                    final id = related[index]['video_id']
+                        ?.toString();
+
+                    if (id == null || id.isEmpty) return;
+
+                    // 用 push 打开新页面，返回时回到当前视频
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => VideoDetailPage(videoId: id),
+                      ),
+                    );
+                  },
+                );
+              },
+            );
+          },
+        ),
+      ],
+    );
+  }
+
 }
 
 class _InfoRow
@@ -3628,6 +4489,11 @@ class _InfoRow
   Widget build(
     BuildContext context,
   ) {
+    // 值为空时整行不显示，避免出现「品牌 / 发行日期」后面空一片
+    if (value.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
+
     return Padding(
       padding:
           const EdgeInsets.only(
@@ -3893,7 +4759,7 @@ class _FullscreenPlayerPageState
                                 vertical: 3,
                               ),
                               decoration: BoxDecoration(
-                                color: Colors.black.withOpacity(0.85),
+                                color: Colors.black.withValues(alpha: 0.85),
                                 borderRadius: BorderRadius.circular(3),
                               ),
                               child: Text(
@@ -3987,7 +4853,7 @@ class _FullscreenPlayerPageState
                                       inactiveTrackColor: Colors.white24,
                                       thumbColor: Colors.red,
                                       overlayColor:
-                                          Colors.red.withOpacity(0.2),
+                                          Colors.red.withValues(alpha: 0.2),
                                       thumbShape:
                                           const RoundSliderThumbShape(
                                         enabledThumbRadius: 6.0,
@@ -4136,6 +5002,428 @@ class _FullscreenPlayerPageState
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ==========================================================
+// 筛选按钮的统一外观
+// ==========================================================
+//
+// 五个筛选项（影片类型 / 排序 / 日期 / 時長 / 標籤）共用这一套尺寸和配色，
+// 保证美术风格一致。要整体调整筛选栏的样子，改这里就够了。
+// ==========================================================
+// 侧边栏底部的账号入口
+// ==========================================================
+
+/// 未登录：一个「登录」按钮。
+/// 已登录：显示头像 + 名字，点击进入自己的主页，右键可退出登录。
+class _AccountTile extends StatelessWidget {
+  final VoidCallback onOpenProfile;
+  final Future<void> Function() onLogout;
+
+  const _AccountTile({
+    required this.onOpenProfile,
+    required this.onLogout,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    // 跟着登录状态自动重建
+    return ValueListenableBuilder<AccountInfo>(
+      valueListenable: AuthController.account,
+      builder: (context, info, _) {
+        if (!info.loggedIn) {
+          return Padding(
+            padding: const EdgeInsets.all(8),
+            child: Tooltip(
+              message: '登录后可以点赞、储存、查看自己的收藏',
+              child: TextButton.icon(
+                onPressed: onOpenProfile,
+                icon: const Icon(Icons.login, size: 18),
+                label: const Text('登录'),
+                style: TextButton.styleFrom(
+                  minimumSize: const Size.fromHeight(40),
+                ),
+              ),
+            ),
+          );
+        }
+
+        // 昵称不显示在头像下面（只保留头像，更干净）
+        return PopupMenuButton<String>(
+          tooltip: '打开我的主页（右键可登出）',
+          position: PopupMenuPosition.over,
+          onSelected: (value) {
+            if (value == 'logout') {
+              onLogout();
+            }
+          },
+          itemBuilder: (context) => [
+            const PopupMenuItem(
+              value: 'profile',
+              height: 40,
+              child: Row(
+                children: [
+                  Icon(Icons.person_outline, size: 18),
+                  SizedBox(width: 10),
+                  Text('我的主页'),
+                ],
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'logout',
+              height: 40,
+              child: Row(
+                children: [
+                  Icon(Icons.logout, size: 18),
+                  SizedBox(width: 10),
+                  Text('退出登录'),
+                ],
+              ),
+            ),
+          ],
+          child: InkWell(
+            onTap: onOpenProfile,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 8,
+                vertical: 10,
+              ),
+              // 只显示头像，不显示昵称
+              child: CircleAvatar(
+                radius: 20,
+                backgroundColor:
+                    theme.colorScheme.primary.withValues(alpha: 0.15),
+                backgroundImage:
+                    info.avatar.isEmpty ? null : NetworkImage(info.avatar),
+                child: info.avatar.isEmpty
+                    ? Icon(
+                        Icons.person,
+                        size: 22,
+                        color: theme.colorScheme.primary,
+                      )
+                    : null,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ==========================================================
+// 详情页操作条 / 相关影片
+// ==========================================================
+
+/// 详情页操作条上的一个只读按钮（点赞 / 储存 / 下载）。
+///
+/// 官网的点赞和储存需要登录账号才能生效，所以这里做成展示型按钮，
+/// 不假装能点，但把真实的点赞比例和数量显示出来。
+class _ActionChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String trailing;
+  final String tooltip;
+  final Color? color;
+  final VoidCallback? onTap;
+  final bool busy;
+
+  const _ActionChip({
+    required this.icon,
+    required this.label,
+    this.trailing = '',
+    this.tooltip = '',
+    this.color,
+    this.onTap,
+    this.busy = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final tint = color ?? theme.colorScheme.onSurface.withValues(alpha: 0.7);
+
+    Widget chip = Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      decoration: BoxDecoration(
+        color: isDark
+            ? Colors.white.withValues(alpha: 0.06)
+            : const Color(0xFFF3F4F6),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: isDark ? Colors.white12 : const Color(0xFFE2E4E8),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (busy)
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: tint,
+              ),
+            )
+          else
+            Icon(icon, size: 18, color: tint),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (trailing.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            Text(
+              trailing,
+              style: TextStyle(
+                fontSize: 12,
+                color: tint,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+
+    // 可点击时才包 InkWell（下载那种纯展示的就不包）
+    if (onTap != null) {
+      chip = InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: chip,
+      );
+    }
+
+    if (tooltip.isEmpty) return chip;
+
+    return Tooltip(message: tooltip, child: chip);
+  }
+}
+
+/// 相关影片卡片：封面 + 标题。
+class _RelatedVideoCard extends StatefulWidget {
+  final Map<String, dynamic> video;
+  final VoidCallback onTap;
+
+  const _RelatedVideoCard({
+    required this.video,
+    required this.onTap,
+  });
+
+  @override
+  State<_RelatedVideoCard> createState() => _RelatedVideoCardState();
+}
+
+class _RelatedVideoCardState extends State<_RelatedVideoCard> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    final title = widget.video['title']?.toString() ?? '';
+    final thumbnail = widget.video['thumbnail']?.toString() ?? '';
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            color: _hovering
+                ? theme.colorScheme.primary.withValues(alpha: 0.08)
+                : Colors.transparent,
+          ),
+          padding: const EdgeInsets.all(6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: thumbnail.isEmpty
+                      ? Container(
+                          color: isDark
+                              ? Colors.white10
+                              : Colors.black12,
+                          child: const Center(
+                            child: Icon(
+                              Icons.movie_outlined,
+                              color: Colors.white38,
+                            ),
+                          ),
+                        )
+                      : Image.network(
+                          thumbnail,
+                          fit: BoxFit.cover,
+                          width: double.infinity,
+                          errorBuilder: (_, _, _) => Container(
+                            color: isDark
+                                ? Colors.white10
+                                : Colors.black12,
+                            child: const Center(
+                              child: Icon(
+                                Icons.broken_image_outlined,
+                                color: Colors.white38,
+                              ),
+                            ),
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  height: 1.35,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FilterChipStyle {
+  _FilterChipStyle._();
+
+  static const double height = 34;
+  static const double radius = 17;
+  static const EdgeInsets padding =
+      EdgeInsets.symmetric(horizontal: 12);
+}
+
+/// 筛选栏上的胶囊按钮。
+///
+/// - 未选中：中性描边，低调
+/// - 已选中：主色描边 + 浅主色底，并把选中的值显示出来
+class _FilterChip extends StatelessWidget {
+  /// 前缀文字，例如「排序」
+  final String labelPrefix;
+
+  /// 选中的值，空字符串表示未选中
+  final String text;
+
+  final bool active;
+  final IconData trailing;
+  final bool loading;
+
+  const _FilterChip({
+    required this.labelPrefix,
+    this.text = '',
+    this.active = false,
+    this.trailing = Icons.keyboard_arrow_down_rounded,
+    this.loading = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    final primary = theme.colorScheme.primary;
+
+    final borderColor = active
+        ? primary.withValues(alpha: 0.75)
+        : (isDark ? Colors.white24 : const Color(0xFFD5D7DB));
+
+    final fillColor = active
+        ? primary.withValues(alpha: isDark ? 0.20 : 0.10)
+        : (isDark
+            ? Colors.white.withValues(alpha: 0.05)
+            : Colors.white);
+
+    final textColor = active
+        ? primary
+        : (isDark
+            ? Colors.white.withValues(alpha: 0.82)
+            : const Color(0xFF44464B));
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 150),
+      height: _FilterChipStyle.height,
+      padding: _FilterChipStyle.padding,
+      decoration: BoxDecoration(
+        color: fillColor,
+        borderRadius: BorderRadius.circular(_FilterChipStyle.radius),
+        border: Border.all(color: borderColor, width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            labelPrefix,
+            style: TextStyle(
+              fontSize: 13,
+              color: textColor,
+              fontWeight:
+                  active ? FontWeight.w600 : FontWeight.w500,
+            ),
+          ),
+          if (text.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            // 选中的值单独用一个小色块强调
+            Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 6,
+                vertical: 1,
+              ),
+              decoration: BoxDecoration(
+                color: primary.withValues(alpha: isDark ? 0.28 : 0.16),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                text,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: primary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(width: 4),
+          if (loading)
+            SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(
+                strokeWidth: 1.8,
+                color: primary,
+              ),
+            )
+          else
+            Icon(
+              trailing,
+              size: 18,
+              color: active
+                  ? primary
+                  : (isDark ? Colors.white54 : Colors.black45),
+            ),
+        ],
       ),
     );
   }

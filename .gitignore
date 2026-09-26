@@ -1,0 +1,64 @@
+# ============================================
+# HanimeViewer .gitignore
+# ============================================
+
+# ---------- Python ----------
+# 虚拟环境：体积大、可重建，绝对不要提交
+.venv/
+venv/
+env/
+
+# Python 编译缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 打包 / 构建产物
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# 测试与类型检查缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------- Flutter / Dart ----------
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+
+# Flutter 构建产物
+frontend/build/
+frontend/.dart_tool/
+
+# Windows 桌面端构建时生成的临时目录（含 CMake 缓存和插件符号链接）
+frontend/windows/flutter/ephemeral/
+frontend/linux/flutter/ephemeral/
+frontend/macos/Flutter/ephemeral/
+
+# 其他平台构建产物
+*.iml
+.gradle/
+frontend/android/.gradle/
+frontend/android/local.properties
+frontend/android/key.properties
+
+# ---------- 编辑器 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---------- 操作系统 ----------
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---------- 本地临时文件 ----------
+*.log
+tmp/

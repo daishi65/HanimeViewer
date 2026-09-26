@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import 'main.dart';
 import 'widgets/windows11_loading.dart';
+import 'controllers/app_config.dart';
 
 class PlaylistDetailPage extends StatefulWidget {
   final String listId;
@@ -42,7 +43,7 @@ class _PlaylistDetailPageState
 
     try {
       final uri = Uri.parse(
-        'http://127.0.0.1:8000/api/playlist',
+        '${AppConfig.backendBase}/api/playlist',
       ).replace(
         queryParameters: {
           'list_id': widget.listId,

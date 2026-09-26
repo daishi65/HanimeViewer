@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import 'playlist_detail_page.dart';
 import 'widgets/windows11_loading.dart';
+import 'controllers/app_config.dart';
 
 class PlaylistPage extends StatefulWidget {
   const PlaylistPage({super.key});
@@ -17,7 +18,16 @@ class _PlaylistPageState extends State<PlaylistPage> {
   List<Map<String, dynamic>> _playlists = [];
 
   int _page = 1;
-  int _totalPages = 8;
+
+  /// 总页数。
+  ///
+  /// 以前这里写死 8（还有个「不足 8 也按 8 算」的下限），
+  /// 结果只有 1 页的账号也会显示 8 页页码，点第 2 页就空白。
+  /// 现在完全由服务端返回的 total_pages 决定，没有数据就保持 1（等于不显示分页）。
+  int _totalPages = 1;
+
+  /// 服务端是否已经回过至少一次（没回过就不显示分页）
+  bool _loadedOnce = false;
 
   bool _loading = true;
   String? _error;
@@ -42,7 +52,7 @@ class _PlaylistPageState extends State<PlaylistPage> {
 
     try {
       final uri = Uri.parse(
-        'http://127.0.0.1:8000/api/playlists',
+        '${AppConfig.backendBase}/api/playlists',
       ).replace(
         queryParameters: {
           'page': targetPage.toString(),
@@ -80,10 +90,10 @@ class _PlaylistPageState extends State<PlaylistPage> {
       setState(() {
         _playlists = results;
         _page = currentPage;
-        _totalPages =
-            serverTotalPages < 8
-                ? 8
-                : serverTotalPages;
+
+        // 用服务端真实页数，不再有「最少 8 页」这种下限
+        _totalPages = serverTotalPages < 1 ? 1 : serverTotalPages;
+        _loadedOnce = true;
       });
     } catch (e) {
       if (!mounted) return;
@@ -263,7 +273,8 @@ class _PlaylistPageState extends State<PlaylistPage> {
                         crossAxisCount,
                     crossAxisSpacing: 14,
                     mainAxisSpacing: 14,
-                    childAspectRatio: 1.35,
+                    // 缩略图 16:9 + 标题两行 + 一部影片数
+                    childAspectRatio: 0.95,
                   ),
                   itemCount: _playlists.length,
                   itemBuilder: (
@@ -305,13 +316,16 @@ class _PlaylistPageState extends State<PlaylistPage> {
           ),
         ),
 
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            18,
-            6,
-            18,
-            14,
-          ),
+        // 只有真的存在多页时才显示分页条。
+        // 没有播放清单（或只有一页）就不显示，「有多少页显示多少页」。
+        if (_loadedOnce && _totalPages > 1 && _playlists.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              18,
+              6,
+              18,
+              14,
+            ),
           child: Row(
             mainAxisAlignment:
                 MainAxisAlignment.center,
@@ -401,25 +415,26 @@ class _PlaylistCard extends StatelessWidget {
         onTap: onTap,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(
-              flex: 6,
+            // 缩略图统一 16:9（和其它影片卡片一致）。
+            // 以前是 Expanded flex 6/4，缩略图比例会随卡片高度变化。
+            AspectRatio(
+              aspectRatio: 16 / 9,
               child: _buildThumbnail(),
             ),
 
-            Expanded(
-              flex: 4,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  10,
-                  7,
-                  8,
-                  7,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                10,
+                7,
+                8,
+                7,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
                     Text(
                       name,
                       maxLines: 2,
@@ -432,31 +447,33 @@ class _PlaylistCard extends StatelessWidget {
                     ),
 
                     if (videoCount.isNotEmpty)
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.video_library_outlined,
-                            size: 15,
-                            color: Colors.grey,
-                          ),
-                          const SizedBox(width: 4),
-                          Flexible(
-                            child: Text(
-                              videoCount,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 12,
-                                height: 1.1,
-                                color: Colors.grey,
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.video_library_outlined,
+                              size: 15,
+                              color: Colors.grey,
+                            ),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                videoCount,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  height: 1.1,
+                                  color: Colors.grey,
+                                ),
                               ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                  ],
-                ),
+                ],
               ),
             ),
           ],

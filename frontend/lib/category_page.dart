@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'main.dart';
+import 'controllers/app_cache.dart';
 import 'widgets/windows11_loading.dart';
+import 'controllers/app_config.dart';
 
 class CategoryPage extends StatefulWidget {
   final String title;
@@ -45,6 +47,9 @@ class _CategoryPageState
 
   List<Map<String, dynamic>> _tagGroups = [];
   bool _tagsLoaded = false;
+
+  /// 标签分组缓存 key（与搜索页共用，标签列表本来就是同一份）
+  static const String _tagCacheKey = 'search_tag_groups';
 
   static const List<Map<String, String>> _sortOptions = [
     {'label': '默认排序', 'value': ''},
@@ -134,7 +139,7 @@ class _CategoryPageState
       params['page'] = targetPage.toString();
 
       final uri = Uri.parse(
-        'http://127.0.0.1:8000/api/filter',
+        '${AppConfig.backendBase}/api/filter',
       ).replace(queryParameters: params);
 
       final response = await http.get(uri);
@@ -150,6 +155,25 @@ class _CategoryPageState
       final results = List<Map<String, dynamic>>.from(
         data['results'] ?? [],
       );
+
+      // 标签分组随搜索结果一起返回（后端从同一个页面解析出来的），
+      // 存下来后点「標籤」就不用再等一次请求，弹窗可以秒开。
+      final tagGroups = data['tag_groups'];
+
+      if (tagGroups is List && tagGroups.isNotEmpty) {
+        AppCache.set(
+          _tagCacheKey,
+          tagGroups,
+          ttl: AppCache.tagsTtl,
+        );
+
+        if (mounted) {
+          setState(() {
+            _tagGroups = List<Map<String, dynamic>>.from(tagGroups);
+            _tagsLoaded = true;
+          });
+        }
+      }
 
       final currentPage =
           int.tryParse(data['page']?.toString() ?? '') ??
@@ -183,9 +207,21 @@ class _CategoryPageState
   Future<void> _loadTags() async {
     if (_tagsLoaded) return;
 
+    // 先看缓存（搜索时已经顺手存下来了，正常情况都走这里）
+    final cached = AppCache.get(_tagCacheKey);
+
+    if (cached is List && cached.isNotEmpty) {
+      setState(() {
+        _tagGroups = List<Map<String, dynamic>>.from(cached);
+        _tagsLoaded = true;
+      });
+
+      return;
+    }
+
     try {
       final response = await http.get(
-        Uri.parse('http://127.0.0.1:8000/api/tags'),
+        Uri.parse('${AppConfig.backendBase}/api/tags'),
       );
 
       if (response.statusCode != 200) {
@@ -199,6 +235,14 @@ class _CategoryPageState
       final groups = List<Map<String, dynamic>>.from(
         data['groups'] ?? [],
       );
+
+      if (groups.isNotEmpty) {
+        AppCache.set(
+          _tagCacheKey,
+          groups,
+          ttl: AppCache.tagsTtl,
+        );
+      }
 
       if (!mounted) return;
 
@@ -348,7 +392,7 @@ class _CategoryPageState
                   ? Image.network(
                       thumbnail,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => Container(
+                      errorBuilder: (_, _, _) => Container(
                         color: Colors.black12,
                         alignment: Alignment.center,
                         child: const Icon(Icons.broken_image),
@@ -478,7 +522,7 @@ class _CategoryPageState
         padding: const EdgeInsets.symmetric(horizontal: 12),
         decoration: BoxDecoration(
           color: active
-              ? theme.colorScheme.primary.withOpacity(0.1)
+              ? theme.colorScheme.primary.withValues(alpha: 0.1)
               : Colors.transparent,
           border: Border.all(
             color: active
@@ -531,7 +575,7 @@ class _CategoryPageState
         padding: const EdgeInsets.symmetric(horizontal: 12),
         decoration: BoxDecoration(
           color: active
-              ? theme.colorScheme.primary.withOpacity(0.1)
+              ? theme.colorScheme.primary.withValues(alpha: 0.1)
               : Colors.transparent,
           border: Border.all(
             color: active

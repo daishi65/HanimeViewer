@@ -463,45 +463,102 @@ class HanimeParser:
         return None
 
     def get_brand(self):
-        description = self.get_description()
+        # 品牌（制作商）取自详情页左上角的作品名称节点：
+        # <a id="video-artist-name" href=".../search?query=ピンクパイナップル&amp;genre=裏番">
+        brand_node = self.soup.find(
+            "a",
+            attrs={
+                "id": "video-artist-name"
+            }
+        )
 
-        if not description:
+        if not brand_node:
             return ""
 
-        for line in description.splitlines():
-            line = line.strip()
+        return brand_node.get_text(strip=True)
 
-            if line.startswith("Brand / ブランド:"):
-                return line.split(":", 1)[1].strip()
+    def get_brand_url(self):
+        # 品牌的搜索链接，供客户端点击跳转
+        brand_node = self.soup.find(
+            "a",
+            attrs={
+                "id": "video-artist-name"
+            }
+        )
+
+        if not brand_node:
+            return ""
+
+        return self.clean_url(brand_node.get("href")) or ""
+
+    def get_uploader(self):
+        # 上传者（投稿用户），名称在详情面板中：
+        # <div class="video-description-panel">
+        #   <a href=".../user/68664"><span style="color: white; font-weight: bold;">孤独的波斯猫</span></a>
+        panel = self.soup.find(
+            "div",
+            class_="video-description-panel"
+        )
+
+        if not panel:
+            return ""
+
+        # 名称位于指向用户主页的链接中：
+        # <a href="https://hanime1.me/user/68664"><span ...>孤独的波斯猫</span></a>
+        # 注意：面板里还有其他 span（例如“上傳者”标签），
+        # 所以必须按 href 定位，不能直接取第一个 span。
+        for link in panel.find_all("a", href=True):
+            href = self.clean_url(link.get("href")) or ""
+
+            if "/user/" not in href:
+                continue
+
+            name = link.get_text(strip=True)
+
+            if name:
+                return name
 
         return ""
 
     def get_release_date(self):
-        description = self.get_description()
+        # 页面上的日期形如：
+        # 觀看次數：692.7萬次&nbsp;&nbsp;2024-11-29
+        # 这里直接匹配 YYYY-MM-DD，避免依赖标签文字
+        import re
 
-        if not description:
-            return ""
+        text = self.soup.get_text(" ", strip=True)
 
-        for line in description.splitlines():
-            line = line.strip()
+        match = re.search(
+            r"(\d{4}-\d{2}-\d{2})",
+            text
+        )
 
-            if line.startswith("Release / 販売日:"):
-                return line.split(":", 1)[1].strip()
+        if match:
+            return match.group(1)
+
+        return ""
+
+    def get_views(self):
+        # 观看次数，形如：觀看次數：692.7萬次
+        import re
+
+        text = self.soup.get_text(" ", strip=True)
+
+        match = re.search(
+            r"觀看次數[：:]\s*([0-9.,]+\s*[萬万亿]?次?)",
+            text
+        )
+
+        if match:
+            return match.group(1).strip()
 
         return ""
 
     def get_file_size(self):
-        description = self.get_description()
-
-        if not description:
-            return ""
-
-        for line in description.splitlines():
-            line = line.strip()
-
-            if line.startswith("File size / ファイル容量:"):
-                return line.split(":", 1)[1].strip()
-
+        # 影片详情页目前不提供文件大小字段。
+        # 保留该方法是为了兼容 VideoDetail 模型，
+        # 不要再去 meta description 里找 "File size / ファイル容量:"，
+        # 该标签在网站上并不存在（会导致永远返回空字符串）。
         return ""
 
     def get_tags(self):
@@ -526,6 +583,588 @@ class HanimeParser:
             if tag.strip()
         ]
 
+    def get_artist_id(self):
+        # 播放器下方那个头像属于「品牌/制作商」区块，不是上传者：
+        # <a href="https://hanime1.me/user/367299">
+        #   <img id="video-user-avatar" ...>
+        #
+        # 注意区分：真正的上传者在 .video-description-panel 里，
+        # 是另一个用户（见 get_uploader_id）。
+        avatar = self.soup.find("img", attrs={"id": "video-user-avatar"})
+
+        if not avatar:
+            return ""
+
+        link = avatar.find_parent("a", href=True)
+
+        if not link:
+            return ""
+
+        href = self.clean_url(link.get("href")) or ""
+
+        if "/user/" not in href:
+            return ""
+
+        return href.rstrip("/").rsplit("/", 1)[-1]
+
+    def get_artist_url(self):
+        avatar = self.soup.find("img", attrs={"id": "video-user-avatar"})
+
+        if not avatar:
+            return ""
+
+        link = avatar.find_parent("a", href=True)
+
+        if not link:
+            return ""
+
+        return self.clean_url(link.get("href")) or ""
+
+    def get_artist_avatar(self):
+        # 头像是两个叠加的 img：默认头像 + 真实头像。
+        # 取最后一个，那才是显示在上层的。
+        avatar = self.soup.find("img", attrs={"id": "video-user-avatar"})
+
+        if not avatar:
+            return ""
+
+        container = avatar.find_parent("div")
+
+        if container:
+            images = container.find_all("img")
+
+            if len(images) >= 2:
+                return self.clean_url(images[-1].get("src")) or ""
+
+        return self.clean_url(avatar.get("src")) or ""
+
+    def _uploader_link(self):
+        """描述面板里指向上传者主页的链接。"""
+        panel = self.soup.find("div", class_="video-description-panel")
+
+        if not panel:
+            return None
+
+        for link in panel.find_all("a", href=True):
+            href = self.clean_url(link.get("href")) or ""
+
+            if "/user/" in href:
+                return link
+
+        return None
+
+    def get_uploader_id(self):
+        link = self._uploader_link()
+
+        if not link:
+            return ""
+
+        href = self.clean_url(link.get("href")) or ""
+
+        return href.rstrip("/").rsplit("/", 1)[-1]
+
+    def get_uploader_url(self):
+        link = self._uploader_link()
+
+        if not link:
+            return ""
+
+        return self.clean_url(link.get("href")) or ""
+
+    def get_uploader_avatar(self):
+        link = self._uploader_link()
+
+        if not link:
+            return ""
+
+        img = link.find("img")
+
+        if not img:
+            return ""
+
+        return self.clean_url(img.get("src")) or ""
+
+    def get_like_info(self):
+        # 点赞/点踩区域：
+        # <button id="video-like-btn">
+        #   <div class="single-icon"><i ...>thumb_up</i>99%&nbsp;&nbsp;<span>(3602)</span></div>
+        # </button>
+        # <button id="video-unlike-btn"> ... <span>(59)</span>
+        result = {
+            "like_ratio": "",
+            "like_count": "",
+            "unlike_count": ""
+        }
+
+        def read_button(button_id):
+            button = self.soup.find("button", attrs={"id": button_id})
+
+            if not button:
+                return "", ""
+
+            span = button.find("span")
+            count = ""
+
+            if span:
+                count = span.get_text(strip=True).strip("()（）")
+                span.extract()
+
+            text = button.get_text(" ", strip=True)
+
+            # 取出形如 99% 的比例
+            import re
+
+            match = re.search(r"(\d+(?:\.\d+)?%)", text)
+
+            ratio = match.group(1) if match else ""
+
+            return ratio, count
+
+        like_ratio, like_count = read_button("video-like-btn")
+        _, unlike_count = read_button("video-unlike-btn")
+
+        result["like_ratio"] = like_ratio
+        result["like_count"] = like_count
+        result["unlike_count"] = unlike_count
+
+        return result
+
+    def get_related_videos(self, limit=None):
+        # 相關影片区：
+        # <div id="related-tabcontent">
+        #   <a href="https://hanime1.me/watch?v=408113">
+        #     <div class="home-rows-videos-div ...">
+        #       <div class="video-card-inner">
+        #         <img src=".../cover/408113.jpg">
+        #         <div class="home-rows-videos-title">标题</div>
+        #
+        # 注意：这个区域里混有广告卡片，它们的 href 是
+        # "javascript:void(0);" 或者站外链接，必须过滤掉，
+        # 只保留指向 watch?v= 的卡片。
+        #
+        # 站点在相关影片区用了**两套版式**（实测都遇到过，取决于视频）：
+        #
+        #   A. 相关影片（横向小卡，每行 6 个）
+        #      <div class="col-xs-2 related-video-width">
+        #        <a href="...watch?v=...">          <- 这个 a **没有 class**
+        #          <div class="home-rows-videos-div">
+        #            <div class="video-card-inner">
+        #              <img src=".../cover/xxx.jpg">  <- img 也**没有 class**
+        #              <div class="home-rows-videos-title">标题</div>
+        #
+        #   B. 相似推荐（栅格大卡）
+        #      <div class="desktop-grid-item">
+        #        <div class="video-item-container" title="标题">
+        #          <a class="video-link" href="...watch?v=...">
+        #            <img class="main-thumb">
+        #            <div class="title">标题</div>
+        #
+        # 之前只认 B 的 `a.video-link`，A 版式里根本没有这个 class，
+        # 于是返回 0 条 —— 这就是「有些视频进详情页后底下没有相关影片」
+        # 的真正原因（不是加载时序问题）。
+        result = []
+        seen = set()
+
+        box = self.soup.find("div", attrs={"id": "related-tabcontent"})
+
+        if not box:
+            return result
+
+        for link in box.find_all("a", href=True):
+            href = self.clean_url(link.get("href")) or ""
+
+            if not href.startswith("https://hanime1.me/watch?"):
+                continue
+
+            video_id = ""
+
+            if "v=" in href:
+                video_id = href.split("v=", 1)[1].split("&", 1)[0]
+
+            if not video_id or video_id in seen:
+                continue
+
+            # 只处理「卡片」形态的链接，跳过卡片里指向作者/标签的其它链接
+            is_variant_a = link.find(
+                "div", class_="home-rows-videos-div"
+            ) is not None
+
+            is_variant_b = "video-link" in (link.get("class") or [])
+
+            if not (is_variant_a or is_variant_b):
+                continue
+
+            seen.add(video_id)
+
+            if is_variant_b:
+                # 版式 B
+                img = link.find("img", class_="main-thumb")
+                thumbnail = self.clean_url(img.get("src")) if img else ""
+
+                title_box = link.find("div", class_="title")
+
+                if title_box:
+                    title = title_box.get_text(strip=True)
+                else:
+                    title = ""
+
+                if not title:
+                    container = link.find_parent(
+                        "div", class_="video-item-container"
+                    )
+
+                    title = (
+                        (container.get("title") or "").strip()
+                        if container
+                        else ""
+                    )
+            else:
+                # 版式 A
+                img = link.find("img")
+                thumbnail = self.clean_url(img.get("src")) if img else ""
+
+                title_box = link.find(
+                    "div", class_="home-rows-videos-title"
+                )
+
+                title = (
+                    title_box.get_text(strip=True) if title_box else ""
+                )
+
+            result.append({
+                "video_id": video_id,
+                "title": title,
+                "url": href,
+                "thumbnail": thumbnail or ""
+            })
+
+            if limit is not None and len(result) >= limit:
+                break
+
+        return result
+
+    def get_user_home_rows(self, limit_per_row=10):
+        """个人中心「主页」上的栏目段。
+
+        页面结构（实测）：
+
+            <div class="tab-index-rows-wrapper">      <- 一个 tab 一个
+              <a class="horizontal-row-title" href=".../histories">
+                <h3>觀看紀錄<div>查看更多...</div></h3>   <- 标题里混着「查看更多」
+              </a>
+              <div>
+                <div class="home-rows-videos-wrapper home-row">
+                  <div class="video-item-container">
+                    <div class="horizontal-card">
+                      <a class="video-link" href="...">   <- 影片 或 播放清单
+                    </div>
+                  </div>
+                  ... 共 10 个左右
+              </div>
+              ... 后面还有 3 组同样结构
+            </div>
+
+        注意两点：
+        1. 标题和卡片是**兄弟节点**，所以要用 find_next_sibling，
+           不能用 find_parent（那会拿到包含全部 4 个栏目的大容器）。
+        2. 「播放清單」这个栏目里的卡片 href 是 /playlist?list=xxx，
+           不是 /watch?v=xxx，数量写在 .stats-container 里。
+        """
+        result = []
+
+        for title in self.soup.find_all(
+            "a", class_="horizontal-row-title"
+        ):
+            name = self._row_title_text(title)
+
+            if not name:
+                continue
+
+            href = self.clean_url(title.get("href")) or ""
+
+            sibling = title.find_next_sibling("div")
+
+            cards = []
+
+            if sibling:
+                cards = sibling.find_all("a", class_="video-link")
+
+            videos = []
+            playlists = []
+
+            for card in cards:
+                card_href = self.clean_url(card.get("href")) or ""
+
+                img = card.find("img", class_="main-thumb")
+                thumbnail = self.clean_url(img.get("src")) if img else ""
+
+                title_box = card.find("div", class_="title")
+                card_title = (
+                    title_box.get_text(strip=True) if title_box else ""
+                )
+
+                if "/playlist?list=" in card_href:
+                    # 播放清单卡片
+                    count = ""
+
+                    stats = card.find("div", class_="stats-container")
+
+                    if stats:
+                        count = stats.get_text(strip=True)
+
+                    list_id = card_href.split("list=", 1)[1].split("&", 1)[0]
+
+                    playlists.append({
+                        "list_id": list_id,
+                        "name": card_title,
+                        "thumbnail": thumbnail or "",
+                        "video_count": count,
+                        "url": card_href,
+                    })
+                    continue
+
+                if not card_href.startswith(
+                    "https://hanime1.me/watch?"
+                ):
+                    continue
+
+                duration_box = card.find("div", class_="duration")
+                duration = (
+                    duration_box.get_text(strip=True)
+                    if duration_box
+                    else ""
+                )
+
+                stat_items = card.find_all("div", class_="stat-item")
+
+                rating = ""
+                views = ""
+
+                if len(stat_items) >= 1:
+                    icon = stat_items[0].find("i")
+
+                    if icon:
+                        icon.extract()
+
+                    rating = stat_items[0].get_text(strip=True)
+
+                if len(stat_items) >= 2:
+                    views = stat_items[1].get_text(strip=True)
+
+                videos.append({
+                    "title": card_title,
+                    "url": card_href,
+                    "thumbnail": thumbnail or "",
+                    "duration": duration,
+                    "rating": rating,
+                    "views": views,
+                })
+
+            items = videos if videos else playlists
+
+            if not items:
+                continue
+
+            result.append({
+                "name": name,
+                "url": href,
+                "kind": "videos" if videos else "playlists",
+                "videos": videos[:limit_per_row],
+                "playlists": playlists[:limit_per_row],
+                "total": len(items),
+            })
+
+        return result
+
+    def _row_title_text(self, title_node):
+        """栏目标题的纯文字。
+
+        <h3>觀看紀錄<div>查看更多 <span>→</span></div></h3>
+        里面混着「查看更多」，要先把这个 div 去掉再取文字。
+        用复制出来的节点处理，不破坏原 soup。
+        """
+        h3 = title_node.find("h3")
+
+        if not h3:
+            return ""
+
+        clone = BeautifulSoup(str(h3), "html.parser").find("h3")
+
+        if not clone:
+            return ""
+
+        extra = clone.find("div")
+
+        if extra:
+            extra.extract()
+
+        return clone.get_text(strip=True)
+
+    def get_total_pages(self):
+        """页面上的总页数（从分页链接里推）。
+
+        个人中心的 tab 页每页 60 条，分页链接形如
+        `/user/715321/histories?page=12`。
+        没有分页就返回 1。
+        """
+        import re
+
+        biggest = 1
+
+        for link in self.soup.find_all("a", href=True):
+            href = self.clean_url(link.get("href")) or ""
+
+            if "page=" not in href:
+                continue
+
+            match = re.search(r"[?&]page=(\d+)", href)
+
+            if not match:
+                continue
+
+            try:
+                number = int(match.group(1))
+            except ValueError:
+                continue
+
+            if number > biggest:
+                biggest = number
+
+        return biggest
+
+    def get_tab_videos(self, limit=None):
+        """个人中心某个 tab（觀看紀錄 / 稍後觀看 / 讚好的影片）里的影片列表。
+
+        这些 tab 页的内容都放在一个
+        `<div class="specific-tab-view home-rows-videos-wrapper">` 里。
+
+        为什么要单独写一个方法，而不是用 get_video_cards()：
+        tab 页上除了真正的内容，还会带上个人中心首页那 4 个栏目段的预览卡片
+        （实测 histories / likes 页面上共 60 个 a.video-link，
+        但真正的列表只有 60 个里的那一部分）。
+        直接全页抓会把预览段和分页重复的卡片一起算进来。
+        """
+        box = self.soup.find("div", class_="specific-tab-view")
+
+        if not box:
+            box = self.soup
+
+        result = []
+
+        for card in box.find_all("a", class_="video-link"):
+            href = self.clean_url(card.get("href")) or ""
+
+            # 播放清单卡片（/playlist?list=xxx）不算影片
+            if not href.startswith("https://hanime1.me/watch?"):
+                continue
+
+            parsed = self._parse_video_link(card)
+
+            if not parsed:
+                continue
+
+            # _parse_video_link 是给首页卡片写的，这里补上 video_id
+            video_id = ""
+
+            if "v=" in href:
+                video_id = href.split("v=", 1)[1].split("&", 1)[0]
+
+            result.append({
+                "video_id": video_id,
+                "title": parsed.title,
+                "url": parsed.url,
+                "thumbnail": parsed.thumbnail,
+                "duration": parsed.duration,
+                "rating": parsed.rating,
+                "views": parsed.views,
+            })
+
+            if limit is not None and len(result) >= limit:
+                break
+
+        return result
+
+    def get_tab_playlists(self, limit=None):
+        """个人中心「播放清單」tab 里的播放清单。"""
+        box = self.soup.find("div", class_="specific-tab-view")
+
+        if not box:
+            box = self.soup
+
+        result = []
+        seen = set()
+
+        for card in box.find_all("a", class_="video-link"):
+            href = self.clean_url(card.get("href")) or ""
+
+            if "/playlist?list=" not in href:
+                continue
+
+            list_id = href.split("list=", 1)[1].split("&", 1)[0]
+
+            if list_id in seen:
+                continue
+
+            seen.add(list_id)
+
+            img = card.find("img", class_="main-thumb")
+            thumbnail = self.clean_url(img.get("src")) if img else ""
+
+            title_box = card.find("div", class_="title")
+            name = title_box.get_text(strip=True) if title_box else ""
+
+            count = ""
+            stats = card.find("div", class_="stats-container")
+
+            if stats:
+                count = stats.get_text(strip=True)
+
+            result.append({
+                "list_id": list_id,
+                "name": name,
+                "thumbnail": thumbnail or "",
+                "video_count": count,
+                "url": href,
+            })
+
+            if limit is not None and len(result) >= limit:
+                break
+
+        return result
+
+    def get_user_avatar(self):
+        """用户/发行商主页上的头像。
+
+        页面上有多张 avatar/icon 图（导航 logo、默认头像等），
+        这里挑真正的用户头像：src 里带 /image/avatar/ 的那张，
+        并且排除默认头像 user_default_image。
+        """
+        best = ""
+
+        for img in self.soup.find_all("img"):
+            src = self.clean_url(img.get("src")) or ""
+
+            if "/image/avatar/" not in src:
+                continue
+
+            if "user_default_image" in src:
+                continue
+
+            best = src
+            break
+
+        if best:
+            return best
+
+        # 退而求其次：页面里带 avatar 字样的第一张
+        for img in self.soup.find_all("img"):
+            src = self.clean_url(img.get("src")) or ""
+
+            if "avatar" in src and "user_default_image" not in src:
+                return src
+
+        return ""
+
     def get_video_detail(self):
         title = self.get_title()
 
@@ -541,16 +1180,31 @@ class HanimeParser:
         else:
             video_url = ""
 
+        like_info = self.get_like_info()
+
         return VideoDetail(
             title=title or "",
             url=video_url,
             video_source=self.get_video_source() or "",
             thumbnail=self.get_thumbnail() or "",
             brand=self.get_brand(),
+            brand_url=self.get_brand_url(),
+            artist_id=self.get_artist_id(),
+            artist_url=self.get_artist_url(),
+            artist_avatar=self.get_artist_avatar(),
+            uploader=self.get_uploader(),
+            uploader_id=self.get_uploader_id(),
+            uploader_url=self.get_uploader_url(),
+            uploader_avatar=self.get_uploader_avatar(),
+            like_ratio=like_info["like_ratio"],
+            like_count=like_info["like_count"],
+            unlike_count=like_info["unlike_count"],
+            views=self.get_views(),
             release_date=self.get_release_date(),
             file_size=self.get_file_size(),
             tags=self.get_tags(),
-            sources=self.get_video_sources()
+            sources=self.get_video_sources(),
+            related=self.get_related_videos()
         )
 
     def get_tag_groups(self):
