@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'main.dart';
+import 'widgets/windows11_loading.dart';
 
 class PlaylistDetailPage extends StatefulWidget {
   final String listId;
@@ -95,10 +96,10 @@ class _PlaylistDetailPageState
   Widget _buildBody() {
     if (_loading) {
       return const Center(
-        child: CircularProgressIndicator(),
+        child: Windows11Loading(size: 48),
       );
     }
-
+    
     if (_error != null) {
       return Center(
         child: Column(

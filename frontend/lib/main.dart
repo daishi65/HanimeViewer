@@ -3,7 +3,8 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'playlist_page.dart';
-import 'category_page.dart';
+import 'widgets/windows11_loading.dart';
+import 'controllers/theme_controller.dart';
 import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
 import 'package:video_player_win/video_player_win.dart';
@@ -15,6 +16,8 @@ void main() async {
 
   await windowManager.ensureInitialized();
 
+  await ThemeController.load();
+
   runApp(const HanimeViewerApp());
 }
 
@@ -23,14 +26,30 @@ class HanimeViewerApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'HanimeViewer',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-        useMaterial3: true,
-      ),
-      home: const MainShell(),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: ThemeController.mode,
+      builder: (context, themeMode, _) {
+        return MaterialApp(
+          title: 'HanimeViewer',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: Colors.deepPurple,
+              brightness: Brightness.light,
+            ),
+            useMaterial3: true,
+          ),
+          darkTheme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: Colors.deepPurple,
+              brightness: Brightness.dark,
+            ),
+            useMaterial3: true,
+          ),
+          themeMode: themeMode,
+          home: const MainShell(),          
+        );        
+      },
     );
   }
 }
@@ -47,28 +66,9 @@ class MainShell extends StatefulWidget {
 class _MainShellState extends State<MainShell> {
   _MainSection _section = _MainSection.home;
 
-  Map<String, String>? _categoryView;
-
-  static const List<Map<String, String>> _categoryOptions = [
-    {'name': '最新上市', 'genre': '', 'sort': '最新上市'},
-    {'name': '最新上傳', 'genre': '', 'sort': '最新上傳'},
-    {'name': '裏番', 'genre': '裏番', 'sort': ''},
-    {'name': '泡麵番', 'genre': '泡麵番', 'sort': ''},
-    {'name': 'Motion Anime', 'genre': 'Motion Anime', 'sort': ''},
-    {'name': '3DCG', 'genre': '3DCG', 'sort': ''},
-    {'name': '2.5D動畫', 'genre': '2.5D', 'sort': ''},
-    {'name': '2D動畫', 'genre': '2D動畫', 'sort': ''},
-    {'name': 'AI生成', 'genre': 'AI生成', 'sort': ''},
-    {'name': 'MMD', 'genre': 'MMD', 'sort': ''},
-    {'name': 'Cosplay', 'genre': 'Cosplay', 'sort': ''},
-    {'name': '他們在看', 'genre': '', 'sort': '他們在看'},
-  ];
+  Map<String, String>? _searchPreset;
 
   String get _title {
-    if (_categoryView != null) {
-      return _categoryView!['title'] ?? '';
-    }
-
     switch (_section) {
       case _MainSection.home:
         return '首页';
@@ -88,7 +88,7 @@ class _MainShellState extends State<MainShell> {
   void _select(_MainSection section) {
     setState(() {
       _section = section;
-      _categoryView = null;
+      _searchPreset = null;
     });
     if (MediaQuery.sizeOf(context).width < 800) {
       Navigator.of(context).maybePop();
@@ -97,101 +97,29 @@ class _MainShellState extends State<MainShell> {
 
   void _openCategory(String title, String genre, String sort) {
     setState(() {
-      _categoryView = {
-        'title': title,
+      _section = _MainSection.search;
+      _searchPreset = {
         'genre': genre,
         'sort': sort,
+        'key': DateTime.now().microsecondsSinceEpoch.toString(),
       };
     });
-  }
-
-  void _closeCategory() {
-    setState(() => _categoryView = null);
-  }
-
-  void _switchCategory(String name, String genre, String sort) {
-    setState(() {
-      _categoryView = {
-        'title': name,
-        'genre': genre,
-        'sort': sort,
-      };
-    });
-  }
-
-  Widget _buildAppBarTitle() {
-    if (_categoryView == null) {
-      return Text(_title);
-    }
-
-    final currentGenre = _categoryView!['genre'] ?? '';
-    final currentSort = _categoryView!['sort'] ?? '';
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(_categoryView!['title'] ?? ''),
-        PopupMenuButton<String>(
-          icon: const Icon(Icons.arrow_drop_down),
-          tooltip: '切换栏目',
-          onSelected: (selectedName) {
-            final selected = _categoryOptions.firstWhere(
-              (o) => o['name'] == selectedName,
-            );
-
-            _switchCategory(
-              selected['name']!,
-              selected['genre']!,
-              selected['sort']!,
-            );
-          },
-          itemBuilder: (context) {
-            return _categoryOptions.map((opt) {
-              final isCurrent =
-                  opt['genre'] == currentGenre &&
-                      opt['sort'] == currentSort;
-
-              return PopupMenuItem<String>(
-                value: opt['name'],
-                child: Row(
-                  children: [
-                    if (isCurrent)
-                      const Icon(
-                        Icons.check,
-                        size: 18,
-                        color: Colors.green,
-                      )
-                    else
-                      const SizedBox(width: 18),
-                    const SizedBox(width: 8),
-                    Text(opt['name']!),
-                  ],
-                ),
-              );
-            }).toList();
-          },
-        ),
-      ],
-    );
   }
 
   Widget _buildPage() {
-    if (_categoryView != null) {
-      return CategoryPage(
-        key: ValueKey(
-          '${_categoryView!['title']}_${_categoryView!['genre']}_${_categoryView!['sort']}',
-        ),
-        title: _categoryView!['title']!,
-        genre: _categoryView!['genre']!,
-        sort: _categoryView!['sort']!,
-      );
-    }
-
     switch (_section) {
       case _MainSection.home:
-        return HomePage(onOpenCategory: _openCategory);        
+        return HomePage(onOpenCategory: _openCategory);
       case _MainSection.search:
-        return const SearchPage();
+        return SearchPage(
+          key: ValueKey(
+            _searchPreset == null
+                ? 'search_default'
+                : 'search_${_searchPreset!['key']}',
+          ),
+          initialGenre: _searchPreset?['genre'] ?? '',
+          initialSort: _searchPreset?['sort'] ?? '',
+        );        
       case _MainSection.history:
         return const HistoryPage();
       case _MainSection.playlist:
@@ -203,11 +131,7 @@ class _MainShellState extends State<MainShell> {
           message: '下载功能稍后实现。',
         );
       case _MainSection.settings:
-        return const _PlaceholderPage(
-          icon: Icons.settings,
-          title: '设置',
-          message: '设置功能稍后实现。',
-        );
+        return const SettingsPage();        
     }
   }
 
@@ -323,23 +247,7 @@ class _MainShellState extends State<MainShell> {
             _buildNavigation(),
             const VerticalDivider(width: 1),
             Expanded(
-              child: Column(
-                children: [
-                  AppBar(
-                    title: _buildAppBarTitle(),
-                    automaticallyImplyLeading: false,
-                    leading: _categoryView != null
-                        ? IconButton(
-                            icon: const Icon(Icons.arrow_back),
-                            onPressed: _closeCategory,
-                          )
-                        : null,
-                  ),
-                  Expanded(
-                    child: _buildPage(),
-                  ),
-                ],                
-              ),
+              child: _buildPage(),              
             ),
           ],
         ),
@@ -348,15 +256,10 @@ class _MainShellState extends State<MainShell> {
 
     return Scaffold(
       appBar: AppBar(
-        title: _buildAppBarTitle(),
-        leading: _categoryView != null
-            ? IconButton(
-                icon: const Icon(Icons.arrow_back),
-                onPressed: _closeCategory,
-              )
-            : null,
+        title: const SizedBox.shrink(),
+        toolbarHeight: 40,
       ),
-      drawer: Drawer(
+      drawer: Drawer(        
         child: _buildNavigation(drawer: true),
       ),
       body: _buildPage(),
@@ -465,7 +368,12 @@ class _HomePageState extends State<HomePage> {
     if (uri == null) return;
 
     final genre = uri.queryParameters['genre'] ?? '';
-    final sort = uri.queryParameters['sort'] ?? '';
+    String sort = uri.queryParameters['sort'] ?? '';
+
+    // 有 genre 时忽略 sort，避免官网 URL 自带的 sort 干扰
+    if (genre.isNotEmpty) {
+      sort = '';
+    }
 
     if (widget.onOpenCategory != null) {
       widget.onOpenCategory!(name, genre, sort);
@@ -610,7 +518,7 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     if (_loading) {
       return const Center(
-        child: CircularProgressIndicator(),
+        child: Windows11Loading(size: 48),
       );
     }
 
@@ -665,21 +573,115 @@ class _HomePageState extends State<HomePage> {
 }
 
 class SearchPage extends StatefulWidget {
-  const SearchPage({super.key});
+  final String initialGenre;
+  final String initialSort;
+
+  const SearchPage({
+    super.key,
+    this.initialGenre = '',
+    this.initialSort = '',
+  });
 
   @override
   State<SearchPage> createState() =>
       _SearchPageState();
 }
 
-class _SearchPageState
-    extends State<SearchPage> {
+class _SearchPageState extends State<SearchPage> {
   final TextEditingController _controller =
       TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
 
   List<Map<String, dynamic>> _results = [];
   bool _loading = false;
   String? _error;
+
+  String _selectedGenre = '';
+  String _selectedSort = '';
+  String _selectedDate = '';
+  String _selectedDuration = '';
+  List<String> _selectedTags = [];
+  bool _broadMatch = false;
+
+  List<Map<String, dynamic>> _tagGroups = [];
+  bool _tagsLoaded = false;
+
+  bool get _isPortraitCategory =>
+      _selectedGenre == '裏番' || _selectedGenre == '泡麵番';
+
+  static const String _historyKey = 'search_history';
+  static const int _maxHistoryCount = 20;
+  List<String> _searchHistory = [];
+  bool _showHistoryPanel = false;
+  
+  @override
+  void initState() {
+    super.initState();
+    _selectedGenre = widget.initialGenre;
+    _selectedSort = widget.initialSort;
+    _searchFocusNode.addListener(_onSearchFocusChanged);
+    _loadSearchHistory();
+
+    // 进入搜索页：无条件加载一次（显示默认搜索结果）
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _search();
+    });
+  }
+
+  void _onSearchFocusChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  static const List<Map<String, String>> _genreOptions = [
+    {'label': '全部', 'value': ''},
+    {'label': '裏番', 'value': '裏番'},
+    {'label': '泡麵番', 'value': '泡麵番'},
+    {'label': 'Motion Anime', 'value': 'Motion Anime'},
+    {'label': '3DCG', 'value': '3DCG'},
+    {'label': '2.5D動畫', 'value': '2.5D'},
+    {'label': '2D動畫', 'value': '2D動畫'},
+    {'label': 'AI生成', 'value': 'AI生成'},
+    {'label': 'MMD', 'value': 'MMD'},
+    {'label': 'Cosplay', 'value': 'Cosplay'},
+  ];
+
+  static const List<Map<String, String>> _sortOptions = [
+
+    {'label': '默认排序', 'value': ''},
+    {'label': '最新上市', 'value': '最新上市'},
+    {'label': '最新上傳', 'value': '最新上傳'},
+    {'label': '本日排行', 'value': '本日排行'},
+    {'label': '本週排行', 'value': '本週排行'},
+    {'label': '本月排行', 'value': '本月排行'},
+    {'label': '觀看次數', 'value': '觀看次數'},
+    {'label': '讚好比例', 'value': '讚好比例'},
+    {'label': '時長最長', 'value': '時長最長'},
+    {'label': '他們在看', 'value': '他們在看'},
+  ];
+
+  static const List<Map<String, String>> _dateOptions = [
+    {'label': '全部', 'value': ''},
+    {'label': '過去 24 小時', 'value': '過去 24 小時'},
+    {'label': '過去 2 天', 'value': '過去 2 天'},
+    {'label': '過去 1 週', 'value': '過去 1 週'},
+    {'label': '過去 1 個月', 'value': '過去 1 個月'},
+    {'label': '過去 3 個月', 'value': '過去 3 個月'},
+    {'label': '過去 1 年', 'value': '過去 1 年'},
+  ];
+
+  static const List<Map<String, String>> _durationOptions = [
+    {'label': '全部', 'value': ''},
+    {'label': '1 分鐘 +', 'value': '1 分鐘 +'},
+    {'label': '5 分鐘 +', 'value': '5 分鐘 +'},
+    {'label': '10 分鐘 +', 'value': '10 分鐘 +'},
+    {'label': '20 分鐘 +', 'value': '20 分鐘 +'},
+    {'label': '30 分鐘 +', 'value': '30 分鐘 +'},
+    {'label': '60 分鐘 +', 'value': '60 分鐘 +'},
+    {'label': '0 - 10 分鐘', 'value': '0 - 10 分鐘'},
+    {'label': '0 - 20 分鐘', 'value': '0 - 20 分鐘'},
+  ];
 
   String? _extractVideoId(String url) {
     final uri = Uri.tryParse(url);
@@ -687,10 +689,9 @@ class _SearchPageState
   }
 
   Future<void> _search() async {
-    final query =
-        _controller.text.trim();
+    final query = _controller.text.trim();
 
-    if (query.isEmpty) return;
+    // 无条件执行搜索：即使没有任何筛选，也加载默认结果
 
     setState(() {
       _loading = true;
@@ -699,17 +700,48 @@ class _SearchPageState
     });
 
     try {
-      final uri =
-          Uri.parse(
-            'http://127.0.0.1:8000/api/search',
-          ).replace(
-        queryParameters: {
-          'query': query,
-        },
-      );
+      final params = <String, String>{};
 
-      final response =
-          await http.get(uri);
+      if (query.isNotEmpty) {
+        params['query'] = query;
+      }
+
+      if (_selectedGenre.isNotEmpty) {
+        params['genre'] = _selectedGenre;
+      }
+
+      if (_selectedSort.isNotEmpty) {
+        params['sort'] = _selectedSort;
+      }
+
+      if (_selectedDate.isNotEmpty) {
+        params['date'] = _selectedDate;
+      }
+
+      if (_selectedDuration.isNotEmpty) {
+        params['duration'] = _selectedDuration;
+      }
+
+      if (_selectedTags.isNotEmpty) {
+        params['tags'] = _selectedTags.join('|');
+      }
+
+      if (_broadMatch && _selectedTags.isNotEmpty) {
+        params['broad'] = 'on';
+      }
+
+      // 后端要求 query/genre/sort 至少有一个
+      if (!params.containsKey('query') &&
+          !params.containsKey('sort') &&
+          !params.containsKey('genre')) {
+        params['query'] = '';
+      }
+
+      final uri = Uri.parse(
+        'http://127.0.0.1:8000/api/filter',
+      ).replace(queryParameters: params);
+
+      final response = await http.get(uri);
 
       if (response.statusCode != 200) {
         throw Exception(
@@ -717,194 +749,881 @@ class _SearchPageState
         );
       }
 
-      final data =
-          jsonDecode(response.body);
+      final data = jsonDecode(response.body);
 
       if (mounted) {
         setState(() {
-          _results =
-              List<Map<String, dynamic>>.from(
+          _results = List<Map<String, dynamic>>.from(
             data['results'] ?? [],
           );
         });
-      }
+
+        if (query.isNotEmpty) {
+          _saveSearchHistory(query);
+        }
+      }      
     } catch (e) {
       if (mounted) {
-        setState(
-          () => _error = '搜索失败：$e',
-        );
+        setState(() => _error = '搜索失败：$e');
       }
     } finally {
       if (mounted) {
-        setState(
-          () => _loading = false,
+        setState(() => _loading = false);
+      }
+    }
+  }
+
+  Future<void> _loadSearchHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final history = prefs.getStringList(_historyKey) ?? [];
+
+      if (mounted) {
+        setState(() => _searchHistory = history);
+      }
+    } catch (_) {
+      // 加载失败就用空列表
+    }
+  }
+
+  Future<void> _saveSearchHistory(String keyword) async {
+    final trimmed = keyword.trim();
+
+    if (trimmed.isEmpty) return;
+
+    // 去重 + 最新排前
+    final updated = [
+      trimmed,
+      ..._searchHistory.where((k) => k != trimmed),
+    ];
+
+    if (updated.length > _maxHistoryCount) {
+      updated.removeRange(_maxHistoryCount, updated.length);
+    }
+
+    setState(() => _searchHistory = updated);
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(_historyKey, updated);
+    } catch (_) {
+      // 持久化失败只影响下次启动
+    }
+  }
+
+  Future<void> _removeSearchHistory(String keyword) async {
+    final updated =
+        _searchHistory.where((k) => k != keyword).toList();
+
+    setState(() => _searchHistory = updated);
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(_historyKey, updated);
+    } catch (_) {}
+  }
+
+  Future<void> _clearSearchHistory() async {
+    setState(() => _searchHistory = []);
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_historyKey);
+    } catch (_) {}
+  }
+
+  Future<void> _loadTags() async {
+    if (_tagsLoaded) return;
+
+    try {
+      final response = await http.get(
+        Uri.parse('http://127.0.0.1:8000/api/tags'),
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          '服务器返回错误: ${response.statusCode}',
         );
       }
+
+      final data = jsonDecode(response.body);
+
+      final groups = List<Map<String, dynamic>>.from(
+        data['groups'] ?? [],
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _tagGroups = groups;
+        _tagsLoaded = true;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('标签加载失败：$e')),
+      );
+    }
+  }
+
+  Future<void> _showTagDialog() async {
+    await _loadTags();
+
+    if (!mounted) return;
+
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (dialogContext) {
+        return SearchTagDialog(
+          groups: _tagGroups,
+          initialTags: _selectedTags,
+          initialBroad: _broadMatch,
+        );
+      },
+    );
+
+    if (result == null) return;
+
+    setState(() {
+      _selectedTags =
+          List<String>.from(result['tags'] ?? []);
+      _broadMatch = result['broad'] == true;
+    });
+
+    if (_controller.text.trim().isNotEmpty) {
+      _search();
     }
   }
 
   @override
   void dispose() {
+    _searchFocusNode.removeListener(_onSearchFocusChanged);
+    _searchFocusNode.dispose();
     _controller.dispose();
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding:
-          const EdgeInsets.all(24),
+  Widget _buildFilterBar() {
+    final hasActiveFilter = _selectedGenre.isNotEmpty ||
+        _selectedSort.isNotEmpty ||
+        _selectedDate.isNotEmpty ||
+        _selectedDuration.isNotEmpty ||
+        _selectedTags.isNotEmpty;
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        _buildFilterMenu(
+          label: '影片类型',
+          currentValue: _selectedGenre,
+          options: _genreOptions,
+          onChanged: (v) {
+            setState(() => _selectedGenre = v);
+            _search();
+          },
+        ),
+        _buildFilterMenu(
+          label: '排序',
+          currentValue: _selectedSort,
+          options: _sortOptions,
+          onChanged: (v) {
+            setState(() => _selectedSort = v);
+            _search();
+          },
+        ),        
+        _buildFilterMenu(
+          label: '日期',
+          currentValue: _selectedDate,
+          options: _dateOptions,
+          onChanged: (v) {
+            setState(() => _selectedDate = v);
+            _search();
+          },
+        ),
+        _buildFilterMenu(
+          label: '時長',
+          currentValue: _selectedDuration,
+          options: _durationOptions,
+          onChanged: (v) {
+            setState(() => _selectedDuration = v);
+            _search();
+          },
+        ),        
+        _buildTagButton(),
+        if (hasActiveFilter)
+          TextButton.icon(
+            onPressed: () {
+              setState(() {
+                _selectedGenre = '';
+                _selectedSort = '';
+                _selectedDate = '';
+                _selectedDuration = '';
+                _selectedTags = [];
+                _broadMatch = false;
+              });
+              _search();
+            },                       
+            icon: const Icon(Icons.close, size: 16),
+            label: const Text('重置'),
+            style: TextButton.styleFrom(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: const Size(0, 32),
+              foregroundColor: Colors.grey.shade700,
+              textStyle: const TextStyle(fontSize: 13),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildFilterMenu({
+    required String label,
+    required String currentValue,
+    required List<Map<String, String>> options,
+    required ValueChanged<String> onChanged,
+  }) {
+    final active = currentValue.isNotEmpty;
+    final displayText =
+        active ? '$label · $currentValue' : label;
+
+    final theme = Theme.of(context);
+
+    return PopupMenuButton<String>(
+      tooltip: label,
+      onSelected: onChanged,
+      itemBuilder: (context) {
+        return options.map((o) {
+          final isCurrent = o['value'] == currentValue;
+
+          return PopupMenuItem<String>(
+            value: o['value'],
+            height: 40,
+            child: Row(
+              children: [
+                if (isCurrent)
+                  const Icon(
+                    Icons.check,
+                    size: 16,
+                    color: Colors.green,
+                  )
+                else
+                  const SizedBox(width: 16),
+                const SizedBox(width: 8),
+                Text(o['label']!),
+              ],
+            ),
+          );
+        }).toList();
+      },
+      child: Container(
+        height: 32,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: active
+              ? theme.colorScheme.primary.withOpacity(0.1)
+              : Colors.transparent,
+          border: Border.all(
+            color: active
+                ? theme.colorScheme.primary
+                : Colors.grey.shade400,
+          ),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              displayText,
+              style: TextStyle(
+                fontSize: 13,
+                color: active
+                    ? theme.colorScheme.primary
+                    : null,
+                fontWeight: active
+                    ? FontWeight.w600
+                    : FontWeight.normal,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Icon(
+              Icons.arrow_drop_down,
+              size: 18,
+              color: active
+                  ? theme.colorScheme.primary
+                  : Colors.grey.shade700,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTagButton() {
+    final active = _selectedTags.isNotEmpty;
+    final displayText =
+        active ? '標籤 · ${_selectedTags.length}' : '標籤';
+
+    final theme = Theme.of(context);
+
+    return InkWell(
+      onTap: _showTagDialog,
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        height: 32,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: active
+              ? theme.colorScheme.primary.withOpacity(0.1)
+              : Colors.transparent,
+          border: Border.all(
+            color: active
+                ? theme.colorScheme.primary
+                : Colors.grey.shade400,
+          ),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              displayText,
+              style: TextStyle(
+                fontSize: 13,
+                color: active
+                    ? theme.colorScheme.primary
+                    : null,
+                fontWeight: active
+                    ? FontWeight.w600
+                    : FontWeight.normal,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Icon(
+              Icons.arrow_drop_down,
+              size: 18,
+              color: active
+                  ? theme.colorScheme.primary
+                  : Colors.grey.shade700,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  int _columnsFor(double width) {
+    if (_isPortraitCategory) {
+      if (width >= 1600) return 8;
+      if (width >= 1300) return 7;
+      if (width >= 1000) return 5;
+      if (width >= 750) return 4;
+      if (width >= 500) return 2;
+      return 1;
+    }
+
+    if (width >= 1600) return 6;
+    if (width >= 1300) return 5;
+    if (width >= 1000) return 4;
+    if (width >= 750) return 3;
+    if (width >= 500) return 2;
+    return 1;
+  }
+
+  Widget _buildResultCard(Map<String, dynamic> video) {
+    final thumbnail =
+        video['thumbnail']?.toString() ?? '';
+    final title = video['title']?.toString() ?? '';
+    final duration =
+        video['duration']?.toString() ?? '';
+    final rating = video['rating']?.toString() ?? '';
+    final views = video['views']?.toString() ?? '';
+
+    final meta = [duration, rating, views]
+        .where((v) => v.isNotEmpty)
+        .join(' · ');
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () {
+          final id = _extractVideoId(
+            video['url']?.toString() ?? '',
+          );
+
+          if (id == null) return;
+
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => VideoDetailPage(videoId: id),
+            ),
+          );
+        },
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            AspectRatio(
+              aspectRatio:
+                  _isPortraitCategory ? 268 / 394 : 16 / 9,
+              child: thumbnail.isNotEmpty
+                  ? Image.network(
+                      thumbnail,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => Container(
+                        color: Colors.black12,
+                        alignment: Alignment.center,
+                        child: const Icon(Icons.broken_image),
+                      ),
+                    )
+                  : Container(
+                      color: Colors.black12,
+                      alignment: Alignment.center,
+                      child: const Icon(Icons.image_not_supported),
+                    ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+              child: Text(
+                title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+            if (meta.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                child: Text(
+                  meta,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              )
+            else
+              const SizedBox(height: 12),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHistoryPanel() {
+    final theme = Theme.of(context);
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),      
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Expanded(
-                child: TextField(
-                  controller: _controller,
-                  decoration:
-                      const InputDecoration(
-                    labelText: '搜索',
-                    hintText:
-                        '输入关键词，例如 nmf',
-                    border:
-                        OutlineInputBorder(),
-                  ),
-                  onSubmitted: (_) =>
-                      _search(),
+              Icon(
+                Icons.history,
+                size: 18,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 6),
+              const Text(
+                '搜索历史',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
-              const SizedBox(width: 12),
-              FilledButton(
-                onPressed:
-                    _loading ? null : _search,
-                child:
-                    const Text('搜索'),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: _clearSearchHistory,
+                icon: const Icon(Icons.delete_outline, size: 16),
+                label: const Text('清空'),
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: const Size(0, 32),
+                  textStyle: const TextStyle(fontSize: 13),
+                ),
               ),
             ],
           ),
-          const SizedBox(height: 20),
-          if (_loading)
-            const LinearProgressIndicator(),
-          if (_error != null)
-            Padding(
-              padding:
-                  const EdgeInsets.all(12),
-              child: Text(
-                _error!,
-                style:
-                    const TextStyle(
-                  color: Colors.red,
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _searchHistory.map((keyword) {
+              return InputChip(
+                label: Text(keyword),
+                mouseCursor: SystemMouseCursors.click,
+                deleteButtonTooltipMessage: '',
+                onPressed: () {
+                  _controller.text = keyword;
+                  _searchFocusNode.unfocus();
+                  setState(
+                    () => _showHistoryPanel = false,
+                  );
+                  _search();
+                },
+                onDeleted: () => _removeSearchHistory(keyword),
+                deleteIcon: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: const Icon(Icons.close, size: 16),
                 ),
-              ),
-            ),
-          Expanded(
-            child:
-                _results.isEmpty &&
-                        !_loading
-                    ? const Center(
-                        child: Text(
-                          '请输入关键词开始搜索',
-                        ),
-                      )
-                    : ListView.builder(
-                        itemCount:
-                            _results.length,
-                        itemBuilder: (
-                          _,
-                          index,
-                        ) {
-                          final video =
-                              _results[index];
-
-                          final thumbnail =
-                              video['thumbnail']
-                                      ?.toString() ??
-                                  '';
-
-                          return Card(
-                            margin:
-                                const EdgeInsets
-                                    .only(
-                              bottom: 12,
-                            ),
-                            child: ListTile(
-                              leading:
-                                  SizedBox(
-                                width: 140,
-                                height: 80,
-                                child: thumbnail
-                                        .isNotEmpty
-                                    ? Image.network(
-                                        thumbnail,
-                                        fit: BoxFit
-                                            .cover,
-                                      )
-                                    : const Icon(
-                                        Icons
-                                            .image,
-                                      ),
-                              ),
-                              title: Text(
-                                video['title']
-                                        ?.toString() ??
-                                    '',
-                                maxLines: 2,
-                                overflow:
-                                    TextOverflow
-                                        .ellipsis,
-                              ),
-                              subtitle:
-                                  Text([
-                                video['duration'] ??
-                                    '',
-                                video['rating'] ??
-                                    '',
-                                video['views'] ??
-                                    '',
-                              ]
-                                      .where(
-                                        (v) =>
-                                            v
-                                                .toString()
-                                                .isNotEmpty,
-                                      )
-                                      .join(
-                                        ' · ',
-                                      )),
-                              trailing:
-                                  const Icon(
-                                Icons
-                                    .chevron_right,
-                              ),
-                              onTap: () {
-                                final id =
-                                    _extractVideoId(
-                                  video['url']
-                                          ?.toString() ??
-                                      '',
-                                );
-
-                                if (id == null) {
-                                  return;
-                                }
-
-                                Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (_) =>
-                                        VideoDetailPage(
-                                      videoId: id,
-                                    ),
-                                  ),
-                                );
-                              },
-                            ),
-                          );
-                        },
-                      ),
-          ),
+              );
+            }).toList(),
+          ),                   
         ],
       ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return const Center(
+      child: Text('没有找到视频'),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRect(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final availableWidth = constraints.maxWidth;
+
+            // 👇 想让搜索框行更靠右 / 更靠左，改这个数字
+            // 0.0 = 居中，0.2 = 稍靠右，0.5 = 很靠右，1.0 = 靠最右
+            // -0.2 = 稍靠左，-1.0 = 靠最左
+            final alignmentX = 0.3;
+
+            // 👇 搜索框行整体宽度（改这里可以调宽度）
+            final contentWidth = availableWidth.clamp(0.0, 1000.0);
+
+            // 👇 自动计算左边缘（历史面板对齐用，不用改）
+            final contentLeft =
+                (availableWidth - contentWidth) / 2 * (1 + alignmentX);
+
+            return Stack(
+              clipBehavior: Clip.none,
+              children: [
+                // ---- 主内容 ----
+                Column(
+                  children: [
+                    SizedBox(
+                      height: 56,
+                      child: Align(
+                        alignment: Alignment(alignmentX, 0),
+                        child: SizedBox(
+                          width: contentWidth,
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              SizedBox(
+                                width: 320,
+                                child: TapRegion(
+                                  groupId: 'search_history',
+                                  child: TextField(
+                                    controller: _controller,
+                                    focusNode: _searchFocusNode,
+                                    decoration: InputDecoration(
+                                      labelText: '主人点击我就能色色了哦',
+                                      hintText: 'Hentai杂鱼主人又在看羞羞的东西',
+                                      border: const OutlineInputBorder(),
+                                      suffixIconConstraints:
+                                          const BoxConstraints(
+                                        minWidth: 0,
+                                        minHeight: 0,
+                                      ),
+                                      suffixIcon: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          if (_controller.text.isNotEmpty)
+                                            IconButton(
+                                              icon: const Icon(
+                                                Icons.clear,
+                                                size: 20,
+                                              ),
+                                              tooltip: '清空',
+                                              onPressed: () {
+                                                setState(() {
+                                                  _controller.clear();
+                                                });
+                                              },
+                                            ),
+                                          IconButton(
+                                            icon: const Icon(
+                                              Icons.search,
+                                              size: 20,
+                                            ),
+                                            tooltip: '搜索',
+                                            onPressed:
+                                                _loading ? null : _search,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    onChanged: (_) {
+                                      setState(() {});
+                                    },
+                                    onTap: () {
+                                      setState(
+                                        () => _showHistoryPanel = true,
+                                      );
+                                    },
+                                    onSubmitted: (_) => _search(),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: _buildFilterBar(),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 20),
+
+                    if (_error != null)
+                      Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Text(
+                          _error!,
+                          style: const TextStyle(color: Colors.red),
+                        ),
+                      ),
+
+                    // ---- 结果区 ----
+                    Expanded(
+                      child: _loading
+                          ? const Align(
+                              alignment: Alignment(0, -0.2),
+                              child: Windows11Loading(size: 56),
+                            )
+                          : _results.isEmpty
+                              ? _buildEmptyState()
+                              : LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    final columns = _columnsFor(
+                                        constraints.maxWidth);
+
+                                    const crossAxisSpacing = 12.0;
+
+                                    final availableWidth =
+                                        constraints.maxWidth -
+                                            crossAxisSpacing *
+                                                (columns - 1);
+                                    final itemWidth =
+                                        availableWidth / columns;
+                                    final thumbnailHeight =
+                                        _isPortraitCategory
+                                            ? itemWidth * 394 / 268
+                                            : itemWidth * 9 / 16;
+                                    final itemHeight =
+                                        thumbnailHeight + 92;
+
+                                    return GridView.builder(
+                                      padding: EdgeInsets.zero,
+                                      gridDelegate:
+                                          SliverGridDelegateWithFixedCrossAxisCount(
+                                        crossAxisCount: columns,
+                                        crossAxisSpacing: crossAxisSpacing,
+                                        mainAxisSpacing: 12,
+                                        mainAxisExtent: itemHeight,
+                                      ),
+                                      itemCount: _results.length,
+                                      itemBuilder: (_, index) =>
+                                          _buildResultCard(
+                                              _results[index]),
+                                    );
+                                  },
+                                ),
+                    ),
+                  ],
+                ),
+
+                // ---- 搜索历史浮层（Stack 最上层） ----
+                if (_showHistoryPanel && _searchHistory.isNotEmpty)
+                  Positioned(
+                    top: 64,
+                    left: contentLeft,
+                    width: 320,
+                    child: TapRegion(
+                      groupId: 'search_history',
+                      onTapOutside: (_) {
+                        if (mounted) {
+                          setState(
+                            () => _showHistoryPanel = false,
+                          );
+                        }
+                      },
+                      child: Material(
+                        elevation: 8,
+                        borderRadius: BorderRadius.circular(12),
+                        color: Theme.of(context).brightness ==
+                                Brightness.dark
+                            ? const Color(0xFF2A2A2A)
+                            : Colors.white,
+                        clipBehavior: Clip.antiAlias,
+                        child: _buildHistoryPanel(),
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class SearchTagDialog extends StatefulWidget {
+  final List<Map<String, dynamic>> groups;
+  final List<String> initialTags;
+  final bool initialBroad;
+
+  const SearchTagDialog({
+    super.key,
+    required this.groups,
+    required this.initialTags,
+    required this.initialBroad,
+  });
+
+  @override
+  State<SearchTagDialog> createState() =>
+      _SearchTagDialogState();
+}
+
+class _SearchTagDialogState
+    extends State<SearchTagDialog> {
+  late Set<String> _selected;
+  late bool _broad;
+
+  @override
+  void initState() {
+    super.initState();
+    _selected = Set<String>.from(widget.initialTags);
+    _broad = widget.initialBroad;
+  }
+
+  void _toggle(String tag) {
+    setState(() {
+      if (_selected.contains(tag)) {
+        _selected.remove(tag);
+      } else {
+        _selected.add(tag);
+      }
+    });
+  }
+
+  void _clear() {
+    setState(() => _selected.clear());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('选择标签'),
+      content: SizedBox(
+        width: 700,
+        height: 600,
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Switch(
+                  value: _broad,
+                  onChanged: (v) {
+                    setState(() => _broad = v);
+                  },
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    '廣泛配對（符合任一標籤即可，預設需全部符合）',
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: _selected.isEmpty ? null : _clear,
+                  icon: const Icon(Icons.clear, size: 18),
+                  label: const Text('清空'),
+                ),
+              ],
+            ),
+            const Divider(),
+            Expanded(
+              child: ListView.builder(
+                itemCount: widget.groups.length,
+                itemBuilder: (_, index) {
+                  final group = widget.groups[index];
+                  final name =
+                      group['name']?.toString() ?? '';
+                  final tags = List<String>.from(
+                    group['tags'] ?? [],
+                  );
+
+                  return Column(
+                    crossAxisAlignment:
+                        CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(
+                          0,
+                          12,
+                          0,
+                          8,
+                        ),
+                        child: Text(
+                          name,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: tags.map((tag) {
+                          final checked =
+                              _selected.contains(tag);
+
+                          return FilterChip(
+                            label: Text(tag),
+                            selected: checked,
+                            onSelected: (_) => _toggle(tag),
+                          );
+                        }).toList(),
+                      ),
+                      const Divider(height: 24),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () {
+            Navigator.of(context).pop({
+              'tags': _selected.toList(),
+              'broad': _broad,
+            });
+          },
+          child: const Text('確定'),
+        ),
+      ],
     );
   }
 }
@@ -1043,7 +1762,7 @@ class _HistoryPageState
   Widget build(BuildContext context) {
     if (_loading) {
       return const Center(
-        child: CircularProgressIndicator(),
+        child: Windows11Loading(size: 48),
       );
     }
 
@@ -1192,6 +1911,167 @@ class _HistoryPageState
           ),
         ),
       ],
+    );
+  }
+}
+
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key});
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        Text(
+          '外观',
+          style: theme.textTheme.titleLarge?.copyWith(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '选择应用的配色方案',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 16),
+        ValueListenableBuilder<ThemeMode>(
+          valueListenable: ThemeController.mode,
+          builder: (context, mode, _) {
+            return Column(
+              children: [
+                _ThemeOptionTile(
+                  icon: Icons.brightness_auto,
+                  title: '跟随系统',
+                  subtitle: '根据系统设置自动切换',
+                  selected: mode == ThemeMode.system,
+                  onTap: () => ThemeController.setMode(
+                    ThemeMode.system,
+                  ),
+                ),
+                _ThemeOptionTile(
+                  icon: Icons.light_mode_outlined,
+                  title: '浅色',
+                  subtitle: '始终使用浅色主题',
+                  selected: mode == ThemeMode.light,
+                  onTap: () => ThemeController.setMode(
+                    ThemeMode.light,
+                  ),
+                ),
+                _ThemeOptionTile(
+                  icon: Icons.dark_mode_outlined,
+                  title: '深色',
+                  subtitle: '始终使用深色主题',
+                  selected: mode == ThemeMode.dark,
+                  onTap: () => ThemeController.setMode(
+                    ThemeMode.dark,
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+class _ThemeOptionTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _ThemeOptionTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: selected
+            ? theme.colorScheme.primary.withOpacity(0.1)
+            : theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 12,
+            ),
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: selected
+                    ? theme.colorScheme.primary
+                    : theme.colorScheme.outlineVariant,
+                width: selected ? 2 : 1,
+              ),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  icon,
+                  size: 24,
+                  color: selected
+                      ? theme.colorScheme.primary
+                      : theme.colorScheme.onSurface,
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: selected
+                              ? FontWeight.w600
+                              : FontWeight.normal,
+                          color: selected
+                              ? theme.colorScheme.primary
+                              : null,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                if (selected)
+                  Icon(
+                    Icons.check_circle,
+                    color: theme.colorScheme.primary,
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1804,165 +2684,130 @@ class _VideoDetailPageState
         height: 420,
         color: Colors.black,
         alignment: Alignment.center,
-        child: const CircularProgressIndicator(
+        child: const Windows11Loading(
+          size: 48,
           color: Colors.white,
         ),
       );
     }
 
-    final controller =
-        _videoPlayerController;
+    final controller = _videoPlayerController;
 
-    if (controller == null ||
-        !controller
-            .value
-            .isInitialized) {
+    if (controller == null || !controller.value.isInitialized) {
       return Container(
-        width:
-            double.infinity,
+        width: double.infinity,
         height: 420,
         color: Colors.black,
-        alignment:
-            Alignment.center,
-        child:
-            const CircularProgressIndicator(
+        alignment: Alignment.center,
+        child: const Windows11Loading(
+          size: 48,
           color: Colors.white,
         ),
       );
     }
 
     final thumbnail =
-        _video?['thumbnail']
-                ?.toString() ??
-            '';
+        _video?['thumbnail']?.toString() ?? '';
 
     return ConstrainedBox(
       constraints: BoxConstraints(
         maxHeight: MediaQuery.of(context).size.height * 0.7,
       ),
       child: AspectRatio(
-      aspectRatio: 16 / 9,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          Container(color: Colors.black),
-          MouseRegion(
-            onHover: (_) => _showPlayerControls(),
-            child: Center(
-              child: AspectRatio(
-                aspectRatio: controller.value.aspectRatio,
-                child: VideoPlayer(controller),
+        aspectRatio: 16 / 9,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Container(color: Colors.black),
+            MouseRegion(
+              onHover: (_) => _showPlayerControls(),
+              child: Center(
+                child: AspectRatio(
+                  aspectRatio: controller.value.aspectRatio,
+                  child: VideoPlayer(controller),
+                ),
               ),
             ),
-          ),
-          ValueListenableBuilder(
-            valueListenable: controller,
-            builder: (
-              context,
-              value,
-              child,
-            ) {
-              if (!value.isInitialized ||
-                  value.duration.inMilliseconds <= 0) {
-                return const SizedBox();
-              }
+            ValueListenableBuilder(
+              valueListenable: controller,
+              builder: (context, value, child) {
+                if (!value.isInitialized ||
+                    value.duration.inMilliseconds <= 0) {
+                  return const SizedBox();
+                }
 
-              final progress =
-                  value.position.inMilliseconds /
-                      value.duration.inMilliseconds;
+                final progress = value.position.inMilliseconds /
+                    value.duration.inMilliseconds;
 
-              return Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: IgnorePointer(
-                  child: AnimatedOpacity(
-                    opacity: _showControls ? 0.0 : 1.0,
-                    duration: const Duration(milliseconds: 200),
-                    child: LinearProgressIndicator(
-                      value:
-                          progress.clamp(0.0, 1.0),
-                      minHeight: 4,
-                      backgroundColor:
-                          Colors.white24,
-                      valueColor:
-                          const AlwaysStoppedAnimation<Color>(
-                        Colors.red,
+                return Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: IgnorePointer(
+                    child: AnimatedOpacity(
+                      opacity: _showControls ? 0.0 : 1.0,
+                      duration: const Duration(milliseconds: 200),
+                      child: LinearProgressIndicator(
+                        value: progress.clamp(0.0, 1.0),
+                        minHeight: 4,
+                        backgroundColor: Colors.white24,
+                        valueColor:
+                            const AlwaysStoppedAnimation<Color>(
+                          Colors.red,
+                        ),
                       ),
                     ),
                   ),
-                ),
-              );
-            },
-          ),
-          if (_showControls)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: _buildPlayerControls(),
+                );
+              },
             ),
-
-          if (_showVideoCover)
-            Positioned.fill(
-              child: GestureDetector(
-                onTap: _startVideo,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (thumbnail.isNotEmpty)
-                      Image.network(
-                        thumbnail,
-                        fit: BoxFit.cover,
-                        errorBuilder: (
-                          _,
-                          __,
-                          ___,
-                        ) =>
-                            Container(
-                          color: Colors.black,
-                        ),
-                      )
-                    else
-                      Container(
-                        color: Colors.black,
-                      ),
-
-                    Container(
-                      color:
-                          Colors.black26,
-                    ),
-
-                    const Center(
-                      child: DecoratedBox(
-                        decoration:
-                            BoxDecoration(
-                          color:
-                              Colors.black54,
-                          shape:
-                              BoxShape.circle,
-                        ),
-                        child: Padding(
-                          padding:
-                              EdgeInsets.all(
-                            16,
+            if (_showControls)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _buildPlayerControls(),
+              ),
+            if (_showVideoCover)
+              Positioned.fill(
+                child: GestureDetector(
+                  onTap: _startVideo,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      if (thumbnail.isNotEmpty)
+                        Image.network(
+                          thumbnail,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Container(
+                            color: Colors.black,
                           ),
-                          child: Icon(
-                            Icons
-                                .play_arrow,
-                            color:
-                                Colors.white,
-                            size: 42,
+                        )
+                      else
+                        Container(color: Colors.black),
+                      Container(color: Colors.black26),
+                      const Center(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: Colors.black54,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Padding(
+                            padding: EdgeInsets.all(16),
+                            child: Icon(
+                              Icons.play_arrow,
+                              color: Colors.white,
+                              size: 42,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
-            ),
-        ],
-      ),
+          ],
+        ),
       ),
     );
   }
@@ -2657,9 +3502,8 @@ class _VideoDetailPageState
   ) {
     return Scaffold(
       appBar: AppBar(
-        title:
-            const Text('视频详情'),
-      ),
+        title: const SizedBox.shrink(),
+      ),      
       body: _buildBody(),
     );
   }
@@ -2667,8 +3511,7 @@ class _VideoDetailPageState
   Widget _buildBody() {
     if (_loading) {
       return const Center(
-        child:
-            CircularProgressIndicator(),
+        child: Windows11Loading(size: 48),
       );
     }
 
@@ -3245,12 +4088,13 @@ class _FullscreenPlayerPageState
                     ? Container(
                         color: Colors.black,
                         alignment: Alignment.center,
-                        child: const CircularProgressIndicator(
+                        child: const Windows11Loading(
+                          size: 48,
                           color: Colors.white,
                         ),
                       )
                     : VideoPlayer(_controller),
-              ),
+              ),              
             ),
 
             // 底部常驻细进度条（控制栏出现时淡出）

@@ -553,6 +553,70 @@ class HanimeParser:
             sources=self.get_video_sources()
         )
 
+    def get_tag_groups(self):
+        # 从 genre 页面提取所有标签分组
+        # 返回格式：[{"name": "人物關係", "tags": ["近親", "姐", ...]}, ...]
+
+        result = []
+
+        modal = self.soup.find("div", id="tags")
+
+        if not modal:
+            return result
+
+        modal_body = modal.find("div", class_="modal-body")
+
+        if not modal_body:
+            return result
+
+        elements = modal_body.find_all(["h5", "label"])
+
+        current_group = None
+        current_tags = []
+
+        def flush():
+            if current_group and current_tags:
+                result.append({
+                    "name": current_group,
+                    "tags": list(current_tags)
+                })
+
+        for el in elements:
+            classes = el.get("class", [])
+
+            if el.name == "h5":
+                flush()
+
+                text = el.get_text(strip=True)
+
+                if text == "廣泛配對":
+                    current_group = None
+                    current_tags = []
+                else:
+                    current_group = text
+                    current_tags = []
+
+            elif el.name == "label":
+                if "hentai-tags-wrapper" not in classes:
+                    continue
+
+                input_el = el.find(
+                    "input",
+                    attrs={"name": "tags[]"}
+                )
+
+                if not input_el:
+                    continue
+
+                value = input_el.get("value", "")
+
+                if value:
+                    current_tags.append(value)
+
+        flush()
+
+        return result
+
     def get_search_total_pages(self):
         from urllib.parse import urlparse, parse_qs
 

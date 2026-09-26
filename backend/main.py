@@ -145,38 +145,87 @@ def home_sections():
             detail=str(exc)
         )
 
+@app.get("/api/tags")
+def get_tags():
+    url = "https://hanime1.me/search?genre=%E8%A3%8F%E7%95%AA"
+
+    try:
+        print("准备打开标签页面:")
+        print(url)
+
+        chrome = ChromeCDP()
+
+        chrome.navigate(url)
+
+        print("等待页面加载...")
+        time.sleep(5)
+
+        html = chrome.get_html()
+
+        print("HTML 长度:")
+        print(len(html))
+
+        parser = HanimeParser(html)
+
+        groups = parser.get_tag_groups()
+
+        print("标签分组数量:")
+        print(len(groups))
+
+        for g in groups:
+            print(f"  {g['name']}: {len(g['tags'])} 个标签")
+
+        return {"groups": groups}
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
 @app.get("/api/filter")
 def filter_videos(
+    query: str = "",
     genre: str = "",
     sort: str = "",
     date: str = "",
     duration: str = "",
-    page: int = 1
+    page: int = 1,
+    tags: str = "",
+    broad: str = ""
 ):
     try:
-        if not genre and not sort:
-            raise HTTPException(
-                status_code=400,
-                detail="genre 和 sort 至少需要一个"
-            )
-
         if page < 1:
             page = 1
 
         from urllib.parse import urlencode
 
-        # 官网用完整参数集，缺任何一个空参数都会导致服务器解析异常
-        params = {
-            "query": "",
-            "type": "",
-            "genre": genre,
-            "sort": sort,
-            "date": date,
-            "duration": duration,
-        }
+        tag_list = [
+            t for t in tags.split("|")
+            if t.strip()
+        ]
+
+        params = [
+            ("query", query),
+            ("type", ""),
+            ("genre", genre),
+        ]
+
+        if broad == "on" and tag_list:
+            params.append(("broad", "on"))
+
+        for tag in tag_list:
+            params.append(("tags[]", tag))
+
+        params.extend([
+            ("sort", sort),
+            ("date", date),
+            ("duration", duration),
+        ])
 
         if page > 1:
-            params["page"] = str(page)
+            params.append(("page", str(page)))
 
         query_string = urlencode(params)
 
@@ -222,10 +271,13 @@ def filter_videos(
             })
 
         return {
+            "query": query,
             "genre": genre,
             "sort": sort,
             "date": date,
             "duration": duration,
+            "tags": tag_list,
+            "broad": broad,
             "page": page,
             "total_pages": total_pages,
             "results": results
